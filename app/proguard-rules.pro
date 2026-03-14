@@ -1,0 +1,3 @@
+-keep class social.bony.nostr.** { *; }
+-keep class org.bouncycastle.** { *; }
+-dontwarn org.bouncycastle.**
