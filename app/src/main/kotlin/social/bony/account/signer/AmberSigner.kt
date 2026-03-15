@@ -24,10 +24,7 @@ class AmberSigner(
 ) : NostrSigner {
 
     override suspend fun signEvent(event: UnsignedEvent): Result<Event> {
-        val payload = Json.encodeToString(
-            UnsignedEventSerializer,
-            event.copy(pubkey = pubkey),
-        )
+        val payload = Json.encodeToString(UnsignedEvent.serializer(), event.copy(pubkey = pubkey))
         val intent = buildIntent(payload, "sign_event")
         return bridge.request(intent).mapCatching { json ->
             Event.fromJson(json).also { signed ->
@@ -62,34 +59,3 @@ class AmberSigner(
         const val REQUEST_CODE = 9001
     }
 }
-
-// ── Serializer shim ───────────────────────────────────────────────────────────
-// UnsignedEvent → JSON matching the NIP-01 event shape Amber expects.
-
-private val UnsignedEventSerializer = kotlinx.serialization.json.Json.serializersModule
-    .let {
-        // Manual serialization — UnsignedEvent mirrors Event minus id/sig
-        object : kotlinx.serialization.KSerializer<UnsignedEvent> {
-            override val descriptor = kotlinx.serialization.descriptors.buildClassSerialDescriptor("UnsignedEvent")
-
-            override fun serialize(
-                encoder: kotlinx.serialization.encoding.Encoder,
-                value: UnsignedEvent,
-            ) {
-                val json = encoder as? kotlinx.serialization.json.JsonEncoder
-                    ?: error("Only JSON encoding supported")
-                json.encodeJsonElement(
-                    kotlinx.serialization.json.buildJsonObject {
-                        put("pubkey", kotlinx.serialization.json.JsonPrimitive(value.pubkey))
-                        put("created_at", kotlinx.serialization.json.JsonPrimitive(value.createdAt))
-                        put("kind", kotlinx.serialization.json.JsonPrimitive(value.kind))
-                        put("tags", kotlinx.serialization.json.JsonArray(value.tags))
-                        put("content", kotlinx.serialization.json.JsonPrimitive(value.content))
-                    }
-                )
-            }
-
-            override fun deserialize(decoder: kotlinx.serialization.encoding.Decoder): UnsignedEvent =
-                error("Deserialization not needed")
-        }
-    }

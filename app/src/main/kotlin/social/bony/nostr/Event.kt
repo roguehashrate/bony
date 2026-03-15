@@ -100,7 +100,7 @@ data class Event(
 @Serializable
 data class UnsignedEvent(
     val pubkey: String,
-    val createdAt: Long = System.currentTimeMillis() / 1000,
+    @SerialName("created_at") val createdAt: Long = System.currentTimeMillis() / 1000,
     val kind: Int,
     val tags: List<JsonArray> = emptyList(),
     val content: String,

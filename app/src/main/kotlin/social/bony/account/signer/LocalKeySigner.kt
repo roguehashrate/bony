@@ -149,8 +149,10 @@ class LocalKeySigner(
         }
     }
 
-    private infix fun ByteArray.xor(other: ByteArray): ByteArray =
-        ByteArray(size) { this[it] xor other[it] }
+    private infix fun ByteArray.xor(other: ByteArray): ByteArray {
+        val a = this
+        return ByteArray(size) { (a[it].toInt() xor other[it].toInt()).toByte() }
+    }
 
     // ── Factory ───────────────────────────────────────────────────────────────
 
