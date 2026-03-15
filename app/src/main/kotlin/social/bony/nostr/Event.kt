@@ -97,6 +97,7 @@ data class Event(
  * A Nostr event that has not yet been signed.
  * Passed to a [social.bony.signer.NostrSigner] to produce a signed [Event].
  */
+@Serializable
 data class UnsignedEvent(
     val pubkey: String,
     val createdAt: Long = System.currentTimeMillis() / 1000,

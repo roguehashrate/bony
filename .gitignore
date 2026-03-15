@@ -8,3 +8,5 @@
 .externalNativeBuild
 .cxx
 local.properties
+java_pid*.hprof
+/app/build/
