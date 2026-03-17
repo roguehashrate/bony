@@ -47,7 +47,8 @@ Legend: ✅ Supported &nbsp;|&nbsp; 🚧 Partial &nbsp;|&nbsp; 🔌 Plugin &nbsp
 
 | NIP | Name | Status | Notes |
 |---|---|---|---|
-| [NIP-01](https://github.com/nostr-protocol/nips/blob/master/01.md) | Basic protocol & event model | ✅ | Event, Filter, relay WebSocket pool |
+| [NIP-01](https://github.com/nostr-protocol/nips/blob/master/01.md) | Basic protocol & event model | ✅ | Event, Filter, relay WebSocket pool, kind-0 profile metadata |
+| [NIP-02](https://github.com/nostr-protocol/nips/blob/master/02.md) | Contact lists | ✅ | Follow list drives the home feed |
 | [NIP-19](https://github.com/nostr-protocol/nips/blob/master/19.md) | bech32-encoded entities | ✅ | npub, note encode/decode |
 | [NIP-44](https://github.com/nostr-protocol/nips/blob/master/44.md) | Versioned encryption | ✅ | ChaCha20 + HMAC-SHA256, HKDF |
 | [NIP-46](https://github.com/nostr-protocol/nips/blob/master/46.md) | Nostr Connect (nsecBunker) | 🚧 | Signer implemented; onboarding UI pending |
@@ -61,7 +62,6 @@ Legend: ✅ Supported &nbsp;|&nbsp; 🚧 Partial &nbsp;|&nbsp; 🔌 Plugin &nbsp
 
 | NIP | Name | Status | Notes |
 |---|---|---|---|
-| [NIP-02](https://github.com/nostr-protocol/nips/blob/master/02.md) | Contact lists | planned | Follow list → home feed |
 | [NIP-04](https://github.com/nostr-protocol/nips/blob/master/04.md) | Encrypted direct messages (legacy) | 🔌 | Deprecated; widely used |
 | [NIP-05](https://github.com/nostr-protocol/nips/blob/master/05.md) | DNS-based identifiers | planned | Verification badge on profiles |
 | [NIP-09](https://github.com/nostr-protocol/nips/blob/master/09.md) | Event deletion | planned | |
