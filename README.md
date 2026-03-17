@@ -39,6 +39,19 @@ No Firebase. No Google Play Services.
 
 ---
 
+## 🗂️ Event Kind Support
+
+| Kind | Name | Handling |
+|------|------|----------|
+| 0 | Metadata | Parsed into `ProfileContent`; cached in `ProfileRepository`; drives avatar + display name in feed |
+| 1 | Text Note | Stored in Room DB; displayed in feed and thread view |
+| 3 | Follow List | Parsed on login to expand home feed subscription to followed pubkeys |
+| 6 | Repost | Stored alongside text notes; displayed in feed (content not unwrapped yet) |
+| 10002 | Relay List | Read relays extracted and connected on login; list persisted to account |
+| 24133 | Nostr Connect | Used internally by `NsecBunkerSigner` for NIP-46 request/response |
+
+---
+
 ## 📡 NIP Compatibility
 
 Legend: ✅ Supported &nbsp;|&nbsp; 🚧 Partial &nbsp;|&nbsp; 🔌 Plugin &nbsp;|&nbsp; planned &nbsp;|&nbsp; — N/A
