@@ -4,7 +4,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -23,10 +22,12 @@ import kotlinx.coroutines.flow.stateIn
 import social.bony.account.AccountRepository
 import social.bony.ui.feed.FeedScreen
 import social.bony.ui.onboarding.OnboardingScreen
+import social.bony.ui.thread.ThreadScreen
 import javax.inject.Inject
 
 private const val ROUTE_ONBOARDING = "onboarding"
 private const val ROUTE_FEED = "feed"
+private const val ROUTE_THREAD = "thread/{eventId}"
 
 @Composable
 fun BonyNavHost() {
@@ -36,7 +37,6 @@ fun BonyNavHost() {
 
     when (startupState) {
         StartupState.Loading -> {
-            // Blank frame while DataStore resolves — typically <100ms
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator()
             }
@@ -56,7 +56,14 @@ fun BonyNavHost() {
                     )
                 }
                 composable(ROUTE_FEED) {
-                    FeedScreen()
+                    FeedScreen(
+                        onThreadClick = { eventId ->
+                            navController.navigate("thread/$eventId")
+                        }
+                    )
+                }
+                composable(ROUTE_THREAD) {
+                    ThreadScreen(onBack = { navController.popBackStack() })
                 }
             }
         }

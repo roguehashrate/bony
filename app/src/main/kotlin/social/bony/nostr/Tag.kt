@@ -50,3 +50,36 @@ val List<Tag>.isReply: Boolean
  */
 val List<Tag>.replyToPubkeys: List<String>
     get() = pubkeys
+
+/**
+ * NIP-10: the direct parent event ID.
+ * Prefers the "reply" marker; falls back to positional (last e-tag).
+ */
+val List<Tag>.replyEventId: String?
+    get() {
+        val eTags = filter { it.name == "e" }
+        if (eTags.isEmpty()) return null
+        return eTags.firstOrNull { it.nip10Marker() == "reply" }?.value()
+            ?: eTags.last().value()
+    }
+
+/**
+ * NIP-10: the root event ID of the thread.
+ * Prefers the "root" marker; falls back to positional (first e-tag when >1).
+ */
+val List<Tag>.rootEventId: String?
+    get() {
+        val eTags = filter { it.name == "e" }
+        if (eTags.isEmpty()) return null
+        return eTags.firstOrNull { it.nip10Marker() == "root" }?.value()
+            ?: if (eTags.size > 1) eTags.first().value() else null
+    }
+
+/**
+ * Returns the NIP-10 marker ("root", "reply", "mention") for an "e" tag.
+ * Marker may be at index 3 (relay hint present) or index 2 (relay hint omitted).
+ */
+private fun Tag.nip10Marker(): String? {
+    val markers = setOf("root", "reply", "mention")
+    return listOfNotNull(value(3), value(2)).firstOrNull { it in markers }
+}

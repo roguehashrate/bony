@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import social.bony.account.Account
 import social.bony.account.AccountRepository
+import social.bony.db.EventRepository
 import social.bony.nostr.Event
 import social.bony.nostr.EventKind
 import social.bony.nostr.Filter
@@ -35,6 +36,7 @@ class FeedViewModel @Inject constructor(
     private val pool: RelayPool,
     private val accountRepository: AccountRepository,
     private val profileRepository: ProfileRepository,
+    private val eventRepository: EventRepository,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(FeedUiState())
@@ -53,6 +55,7 @@ class FeedViewModel @Inject constructor(
     private var feedSubId: String? = null
     private var followSubId: String? = null
     private var metadataSubId: String? = null
+    private var relayListSubId: String? = null
 
     init {
         viewModelScope.launch {
@@ -73,8 +76,22 @@ class FeedViewModel @Inject constructor(
         feedSubId?.let { pool.unsubscribe(it) }
         followSubId?.let { pool.unsubscribe(it) }
         metadataSubId?.let { pool.unsubscribe(it) }
+        relayListSubId?.let { pool.unsubscribe(it) }
 
         _uiState.update { it.copy(events = emptyList(), isLoading = true, error = null) }
+
+        // Preload cached events from DB so feed isn't blank on restart
+        viewModelScope.launch {
+            val cached = eventRepository.getRecentFeedEvents()
+            if (cached.isNotEmpty()) {
+                _uiState.update { state ->
+                    val merged = (state.events + cached)
+                        .distinctBy { it.id }
+                        .sortedByDescending { it.createdAt }
+                    state.copy(events = merged)
+                }
+            }
+        }
 
         val relays = account.relays.ifEmpty { DEFAULT_RELAYS }
         relays.forEach { pool.addRelay(it) }
@@ -88,12 +105,15 @@ class FeedViewModel @Inject constructor(
             )
         ))
 
-        // Fetch follow list (kind-3) and own profile (kind-0) in parallel
+        // Fetch follow list (kind-3), own profile (kind-0), and relay list (kind-10002) in parallel
         followSubId = pool.subscribe(listOf(
             Filter(authors = listOf(account.pubkey), kinds = listOf(EventKind.FOLLOW_LIST), limit = 1)
         ))
         metadataSubId = pool.subscribe(listOf(
             Filter(authors = listOf(account.pubkey), kinds = listOf(EventKind.METADATA), limit = 1)
+        ))
+        relayListSubId = pool.subscribe(listOf(
+            Filter(authors = listOf(account.pubkey), kinds = listOf(EventKind.RELAY_LIST), limit = 1)
         ))
 
         collectJob = viewModelScope.launch { collectMessages() }
@@ -123,6 +143,7 @@ class FeedViewModel @Inject constructor(
         when (event.kind) {
             EventKind.FOLLOW_LIST -> expandFeedToFollows(event)
             EventKind.METADATA    -> profileRepository.processEvent(event)
+            EventKind.RELAY_LIST  -> handleRelayList(event)
             EventKind.TEXT_NOTE,
             EventKind.REPOST      -> addToFeed(event)
         }
@@ -137,14 +158,12 @@ class FeedViewModel @Inject constructor(
         val followed = event.parsedTags.pubkeys
         if (followed.isEmpty()) return
 
-        // We have what we need — close the follow list subscription
         followSubId?.let { pool.unsubscribe(it) }
         followSubId = null
 
         val selfPubkey = activeAccount.value?.pubkey ?: return
         val allPubkeys = (followed + selfPubkey).distinct()
 
-        // Expand the feed subscription to all followed pubkeys
         feedSubId?.let { pool.unsubscribe(it) }
         feedSubId = pool.subscribe(listOf(
             Filter(
@@ -154,14 +173,42 @@ class FeedViewModel @Inject constructor(
             )
         ))
 
-        // Fetch profiles for everyone in one shot
         metadataSubId?.let { pool.unsubscribe(it) }
         metadataSubId = pool.subscribe(listOf(
             Filter(authors = allPubkeys, kinds = listOf(EventKind.METADATA))
         ))
     }
 
+    /**
+     * NIP-65: when the user's relay list arrives, connect to their preferred relays
+     * and persist the list so it's used as the default on next startup.
+     */
+    private fun handleRelayList(event: Event) {
+        // "r" tags: ["r", "<url>", "<optional-marker>"]
+        // marker: "read", "write", or absent (= both)
+        val readRelays = event.parsedTags
+            .filter { it.name == "r" }
+            .mapNotNull { tag ->
+                val url = tag.value() ?: return@mapNotNull null
+                val marker = tag.value(2)
+                if (marker == null || marker == "read") url else null
+            }
+        if (readRelays.isEmpty()) return
+
+        relayListSubId?.let { pool.unsubscribe(it) }
+        relayListSubId = null
+
+        readRelays.forEach { pool.addRelay(it) }
+
+        viewModelScope.launch {
+            activeAccount.value?.let { account ->
+                accountRepository.updateAccount(account.copy(relays = readRelays))
+            }
+        }
+    }
+
     private fun addToFeed(event: Event) {
+        viewModelScope.launch { eventRepository.save(event) }
         _uiState.update { state ->
             val updated = (state.events + event)
                 .distinctBy { it.id }
@@ -175,6 +222,7 @@ class FeedViewModel @Inject constructor(
         feedSubId?.let { pool.unsubscribe(it) }
         followSubId?.let { pool.unsubscribe(it) }
         metadataSubId?.let { pool.unsubscribe(it) }
+        relayListSubId?.let { pool.unsubscribe(it) }
         _uiState.update { FeedUiState(isLoading = false) }
     }
 

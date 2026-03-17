@@ -29,7 +29,7 @@ Do the minimum well. No analytics, no tracking, no Google Services. Authenticati
 | Language | Kotlin |
 | UI | Jetpack Compose |
 | WebSocket | OkHttp |
-| Database | Room (SQLite) |
+| Database | Room (SQLite) — events persisted across restarts |
 | Crypto | Bouncy Castle / tink (secp256k1) |
 | DI | Hilt |
 | Preferences | DataStore |
@@ -65,7 +65,7 @@ Legend: ✅ Supported &nbsp;|&nbsp; 🚧 Partial &nbsp;|&nbsp; 🔌 Plugin &nbsp
 | [NIP-04](https://github.com/nostr-protocol/nips/blob/master/04.md) | Encrypted direct messages (legacy) | 🔌 | Deprecated; widely used |
 | [NIP-05](https://github.com/nostr-protocol/nips/blob/master/05.md) | DNS-based identifiers | planned | Verification badge on profiles |
 | [NIP-09](https://github.com/nostr-protocol/nips/blob/master/09.md) | Event deletion | planned | |
-| [NIP-10](https://github.com/nostr-protocol/nips/blob/master/10.md) | Text note references & replies | ✅ | Reply indicator with compact context (name/npub, overflow count) |
+| [NIP-10](https://github.com/nostr-protocol/nips/blob/master/10.md) | Text note references & replies | ✅ | Reply indicator; tap to open thread view with parent chain |
 | [NIP-11](https://github.com/nostr-protocol/nips/blob/master/11.md) | Relay information document | planned | Relay metadata / limits |
 | [NIP-17](https://github.com/nostr-protocol/nips/blob/master/17.md) | Private direct messages | 🔌 | Replaces NIP-04 |
 | [NIP-18](https://github.com/nostr-protocol/nips/blob/master/18.md) | Reposts | planned | kind 6 |
@@ -75,7 +75,7 @@ Legend: ✅ Supported &nbsp;|&nbsp; 🚧 Partial &nbsp;|&nbsp; 🔌 Plugin &nbsp
 | [NIP-42](https://github.com/nostr-protocol/nips/blob/master/42.md) | Relay authentication | planned | AUTH challenge/response |
 | [NIP-51](https://github.com/nostr-protocol/nips/blob/master/51.md) | Lists | 🔌 | Mute lists, pin lists, bookmarks |
 | [NIP-57](https://github.com/nostr-protocol/nips/blob/master/57.md) | Lightning zaps | 🔌 | |
-| [NIP-65](https://github.com/nostr-protocol/nips/blob/master/65.md) | Relay list metadata | planned | Outbox model |
+| [NIP-65](https://github.com/nostr-protocol/nips/blob/master/65.md) | Relay list metadata | ✅ | Read relays fetched on login; persisted to account |
 
 ### Uncommon NIPs
 

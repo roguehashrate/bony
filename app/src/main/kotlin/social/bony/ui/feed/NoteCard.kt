@@ -1,6 +1,7 @@
 package social.bony.ui.feed
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -32,6 +33,7 @@ import social.bony.nostr.Event
 import social.bony.nostr.Nip19
 import social.bony.nostr.ProfileContent
 import social.bony.nostr.isReply
+import social.bony.nostr.replyEventId
 import social.bony.nostr.replyToPubkeys
 import java.time.Instant
 import java.time.ZoneId
@@ -42,9 +44,12 @@ fun NoteCard(
     event: Event,
     profile: ProfileContent?,
     profiles: Map<String, ProfileContent> = emptyMap(),
+    highlighted: Boolean = false,
+    onThreadClick: ((eventId: String) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
-    Column(modifier = modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+    val background = if (highlighted) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface
+    Column(modifier = modifier.background(background).padding(horizontal = 16.dp, vertical = 12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Avatar(pictureUrl = profile?.picture, modifier = Modifier.size(40.dp))
 
@@ -84,15 +89,22 @@ fun NoteCard(
                 profiles[pubkey]?.bestName?.truncate(20)
                     ?: pubkey.abbreviateAsNpub()
             } + if (replyTargets.size > 1) " +${replyTargets.size - 1}" else ""
+            val parentId = event.parsedTags.replyEventId
             Spacer(Modifier.height(4.dp))
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.padding(start = 50.dp),
+                modifier = Modifier
+                    .padding(start = 50.dp)
+                    .then(
+                        if (onThreadClick != null && parentId != null)
+                            Modifier.clickable { onThreadClick(parentId) }
+                        else Modifier
+                    ),
             ) {
                 Text(
                     text = "↩ $replyLabel",
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = MaterialTheme.colorScheme.primary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
