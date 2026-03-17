@@ -1,10 +1,15 @@
 package social.bony.account.signer
 
 import android.content.Intent
-import android.net.Uri
-import kotlinx.serialization.json.Json
+import android.util.Log
+import androidx.core.net.toUri
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import social.bony.nostr.Event
 import social.bony.nostr.UnsignedEvent
+
+private const val TAG = "BonyAmber"
 
 /**
  * NIP-55: delegates signing and encryption to Amber (or any compatible
@@ -24,12 +29,42 @@ class AmberSigner(
 ) : NostrSigner {
 
     override suspend fun signEvent(event: UnsignedEvent): Result<Event> {
-        val payload = Json.encodeToString(UnsignedEvent.serializer(), event.copy(pubkey = pubkey))
-        val intent = buildIntent(payload, "sign_event")
-        return bridge.request(intent).mapCatching { json ->
-            Event.fromJson(json).also { signed ->
-                check(signed.verify()) { "Amber returned an event with invalid signature" }
+        val withPubkey = event.copy(pubkey = pubkey)
+        val id = withPubkey.computeId()
+
+        // NIP-55: Amber requires id pre-computed and sig="" present.
+        // Amber reads event JSON from the URI (URL-decoded), not from an "event" extra.
+        val eventJson = buildJsonObject {
+            put("id", id)
+            put("pubkey", withPubkey.pubkey)
+            put("created_at", withPubkey.createdAt)
+            put("kind", withPubkey.kind)
+            put("tags", buildJsonArray { withPubkey.tags.forEach { add(it) } })
+            put("content", withPubkey.content)
+            put("sig", "")
+        }.toString()
+
+        Log.d(TAG, "sign_event JSON (first 500): ${eventJson.take(500)}")
+
+        val intent = Intent(Intent.ACTION_VIEW, "nostrsigner:$eventJson".toUri()).apply {
+            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            `package` = AMBER_PACKAGE
+            putExtra("type", "sign_event")
+            putExtra("current_user", pubkey)
+            putExtra("package", callerPackage)
+            putExtra("id", id)
+        }
+
+        return bridge.request(intent).mapCatching { result ->
+            val signed = if (result.startsWith("{")) {
+                Event.fromJson(result)
+            } else {
+                // Amber returned just the 128-char hex signature — reconstruct the event.
+                check(result.length == 128) { "Amber returned unexpected result: $result" }
+                Event(id, withPubkey.pubkey, withPubkey.createdAt, withPubkey.kind, withPubkey.tags, withPubkey.content, result)
             }
+            check(signed.verify()) { "Amber returned an event with invalid signature" }
+            signed
         }
     }
 
@@ -48,14 +83,17 @@ class AmberSigner(
     }
 
     private fun buildIntent(payload: String, type: String): Intent =
-        Intent(Intent.ACTION_VIEW, Uri.parse("nostrsigner:$payload")).apply {
+        Intent(Intent.ACTION_VIEW, "nostrsigner:$payload".toUri()).apply {
             addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            `package` = AMBER_PACKAGE
             putExtra("type", type)
-            putExtra("pubKey", pubkey)
+            putExtra("current_user", pubkey)
             putExtra("package", callerPackage)
         }
 
     companion object {
         const val REQUEST_CODE = 9001
+        const val AMBER_PACKAGE = "com.greenart7c3.nostrsigner"
     }
 }
+
