@@ -59,6 +59,7 @@ fun FeedScreen(
                         activeAccount = activeAccount,
                         accounts = accounts,
                         onSwitch = viewModel::switchAccount,
+                        onProfileClick = activeAccount?.let { { onProfileClick(it.pubkey) } },
                     )
                 },
                 actions = {
