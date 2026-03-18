@@ -1,17 +1,18 @@
 package social.bony.nostr.relay
 
-import android.util.Log
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
+import social.bony.account.AccountRepository
+import social.bony.account.SignerType
 import social.bony.account.signer.NostrSignerFactory
 import social.bony.nostr.EventKind
 import social.bony.nostr.UnsignedEvent
+import timber.log.Timber
 import javax.inject.Inject
 import javax.inject.Singleton
-
-private const val TAG = "RelayAuthManager"
 
 /**
  * NIP-42: responds to AUTH challenges from relays.
@@ -19,13 +20,17 @@ private const val TAG = "RelayAuthManager"
  * Observes [RelayPool.messages] for [RelayMessage.Auth] and replies with
  * a signed kind-22242 event containing the relay URL and challenge string.
  *
- * Call [start] once from MainActivity. AUTH requires signing, so the scope
- * should be tied to the activity lifetime (lifecycleScope).
+ * AUTH is skipped for Amber accounts — signing requires UI interaction
+ * (an Amber dialog per challenge) which would be disruptive. Local key
+ * and nsecBunker accounts respond silently.
+ *
+ * Call [start] once from MainActivity.
  */
 @Singleton
 class RelayAuthManager @Inject constructor(
     private val pool: RelayPool,
     private val signerFactory: NostrSignerFactory,
+    private val accountRepository: AccountRepository,
 ) {
     fun start(scope: CoroutineScope) {
         scope.launch {
@@ -39,11 +44,18 @@ class RelayAuthManager @Inject constructor(
 
     private fun handleAuth(scope: CoroutineScope, relayUrl: String, challenge: String) {
         scope.launch {
-            Log.d(TAG, "AUTH challenge from $relayUrl: $challenge")
-            val signer = signerFactory.forActiveAccount() ?: run {
-                Log.w(TAG, "No active account — cannot respond to AUTH from $relayUrl")
+            val account = accountRepository.activeAccount.first()
+            if (account == null) {
+                Timber.w("AUTH from $relayUrl: no active account")
                 return@launch
             }
+            if (account.signerType == SignerType.AMBER) {
+                Timber.d("AUTH from $relayUrl: skipping — Amber requires UI interaction")
+                return@launch
+            }
+
+            Timber.d("AUTH challenge from $relayUrl: $challenge")
+            val signer = signerFactory.forActiveAccount() ?: return@launch
 
             val unsigned = UnsignedEvent(
                 pubkey = signer.pubkey,
@@ -58,10 +70,10 @@ class RelayAuthManager @Inject constructor(
             signer.signEvent(unsigned)
                 .onSuccess { signed ->
                     pool.send(relayUrl, ClientMessage.Auth(signed))
-                    Log.d(TAG, "AUTH sent to $relayUrl")
+                    Timber.d("AUTH sent to $relayUrl")
                 }
                 .onFailure { e ->
-                    Log.w(TAG, "AUTH signing failed for $relayUrl: ${e.message}")
+                    Timber.w("AUTH signing failed for $relayUrl: ${e.message}")
                 }
         }
     }
