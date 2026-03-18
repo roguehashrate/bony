@@ -10,15 +10,15 @@ import javax.inject.Singleton
 @Singleton
 class EventRepository @Inject constructor(private val dao: EventDao) {
 
-    val feedEvents: Flow<List<Event>> = dao.observeByKinds(
-        listOf(EventKind.TEXT_NOTE, EventKind.REPOST)
+    fun feedEvents(accountPubkey: String): Flow<List<Event>> = dao.observeByKinds(
+        listOf(EventKind.TEXT_NOTE, EventKind.REPOST), accountPubkey
     ).map { it.map(EventEntity::toEvent) }
 
-    suspend fun getRecentFeedEvents(limit: Int = 300): List<Event> =
-        dao.getRecentByKinds(listOf(EventKind.TEXT_NOTE, EventKind.REPOST), limit)
+    suspend fun getRecentFeedEvents(accountPubkey: String, limit: Int = 300): List<Event> =
+        dao.getRecentByKinds(listOf(EventKind.TEXT_NOTE, EventKind.REPOST), accountPubkey, limit)
             .map(EventEntity::toEvent)
 
-    suspend fun save(event: Event) = dao.upsert(event.toEntity())
+    suspend fun save(event: Event, accountPubkey: String) = dao.upsert(event.toEntity(accountPubkey))
 
     suspend fun getById(id: String): Event? = dao.getById(id)?.toEvent()
 

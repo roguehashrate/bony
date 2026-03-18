@@ -14,7 +14,7 @@ Do the minimum well. No analytics, no tracking, no Google Services. Authenticati
 
 ## ⚡ Core Features
 
-- Multi-account support with fast account switching
+- Multi-account support — add, switch, and remove accounts from within the app
 - External signer authentication: [Amber](https://github.com/greenart7c3/Amber) (NIP-55) and nsecBunker (NIP-46)
 - Android Keystore as a local fallback (last resort only)
 - Push notifications via [UnifiedPush](https://unifiedpush.org/) (no FCM)
@@ -85,7 +85,7 @@ Legend: ✅ Supported &nbsp;|&nbsp; 🚧 Partial &nbsp;|&nbsp; 🔌 Plugin &nbsp
 | [NIP-21](https://github.com/nostr-protocol/nips/blob/master/21.md) | `nostr:` URI scheme | planned | Deep links from other apps |
 | [NIP-25](https://github.com/nostr-protocol/nips/blob/master/25.md) | Reactions | 🔌 | Likes, emoji reactions |
 | [NIP-36](https://github.com/nostr-protocol/nips/blob/master/36.md) | Sensitive content | planned | Content warnings |
-| [NIP-42](https://github.com/nostr-protocol/nips/blob/master/42.md) | Relay authentication | ✅ | AUTH challenge/response; kind-22242 signed via active signer |
+| [NIP-42](https://github.com/nostr-protocol/nips/blob/master/42.md) | Relay authentication | 🚧 | Implemented for local-key accounts; skipped for Amber (requires foreground UI) |
 | [NIP-51](https://github.com/nostr-protocol/nips/blob/master/51.md) | Lists | 🔌 | Mute lists, pin lists, bookmarks |
 | [NIP-57](https://github.com/nostr-protocol/nips/blob/master/57.md) | Lightning zaps | 🔌 | |
 | [NIP-65](https://github.com/nostr-protocol/nips/blob/master/65.md) | Relay list metadata | ✅ | Read relays fetched on login; persisted to account |
@@ -211,11 +211,14 @@ Logs are written to the app's private storage (`filesDir/logs/bony.log`), rotate
 
 Near-term priorities for the core app:
 
-- Add a second account from within the app (currently requires a fresh install/onboarding)
 - Inline image rendering in notes
 - Relay status indicator and relay management UI
-- nsecBunker onboarding UI (bunker URL entry)
-- NIP-42 AUTH for non-Amber accounts
+- NIP-42 AUTH for Amber accounts (requires a non-disruptive background signing approach)
+- Feed initialisation ordering: when a local relay (e.g. Citrine) is present, the account's own notes arrive before the follow graph, causing the feed to appear anchored to the user's most recent note until remote relays respond. A relay-quorum EOSE wait would fix this.
+
+**Known limitations:**
+
+- NIP-42 relay AUTH is silently skipped for Amber accounts because signing requires launching Amber in the foreground. If you connect to a relay that *requires* authentication (e.g. a paid or private relay), that relay will not serve you events. Local-key accounts authenticate normally.
 
 ---
 

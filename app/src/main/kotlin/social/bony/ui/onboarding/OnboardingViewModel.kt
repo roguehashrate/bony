@@ -12,22 +12,27 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import social.bony.account.Account
 import social.bony.account.AccountRepository
+import social.bony.account.NsecBunkerConfig
 import social.bony.account.SignerType
 import social.bony.account.signer.AmberSignerBridge
 import social.bony.account.signer.LocalKeySigner
+import social.bony.account.signer.NsecBunkerSigner
 import social.bony.nostr.Nip19
+import social.bony.nostr.relay.RelayPool
 import javax.inject.Inject
 
 data class OnboardingUiState(
     val isLoading: Boolean = false,
     val error: String? = null,
     val success: Boolean = false,
+    val showNsecBunkerForm: Boolean = false,
 )
 
 @HiltViewModel
 class OnboardingViewModel @Inject constructor(
     private val accountRepository: AccountRepository,
     private val amberBridge: AmberSignerBridge,
+    private val pool: RelayPool,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(OnboardingUiState())
@@ -59,6 +64,47 @@ class OnboardingViewModel @Inject constructor(
         }
     }
 
+    /** NIP-46: connect to an nsecBunker via a bunker:// URI. */
+    fun addAccountWithNsecBunker(bunkerUrl: String) {
+        _uiState.update { it.copy(isLoading = true, error = null) }
+        viewModelScope.launch {
+            runCatching {
+                val uri = Uri.parse(bunkerUrl.trim())
+                check(uri.scheme == "bunker") { "URL must start with bunker://" }
+                val bunkerPubkey = uri.host
+                    ?: error("Could not parse bunker pubkey from URL")
+                val relayUrl = uri.getQueryParameter("relay")
+                    ?: error("No relay= parameter in bunker URL")
+                val secret = uri.getQueryParameter("secret") ?: ""
+
+                // Generate ephemeral session keypair for the NIP-46 channel
+                val (sessionSigner, encryptedSessionKey) = LocalKeySigner.generate()
+                val config = NsecBunkerConfig(
+                    bunkerPubkey = bunkerPubkey,
+                    relayUrl = relayUrl,
+                    secret = secret,
+                    sessionPubkey = sessionSigner.pubkey,
+                )
+
+                // Placeholder pubkey — replaced after handshake reveals the real one
+                val tempSigner = NsecBunkerSigner("", config, pool, sessionSigner)
+                val userPubkey = tempSigner.handshake().getOrThrow()
+
+                val account = Account(
+                    pubkey = userPubkey,
+                    signerType = SignerType.NSEC_BUNKER,
+                    nsecBunkerConfig = config,
+                )
+                // Store account; encrypted session key persisted under the user's pubkey
+                accountRepository.addAccount(account, encryptedSessionKey)
+            }.onSuccess {
+                _uiState.update { it.copy(isLoading = false, success = true) }
+            }.onFailure { e ->
+                _uiState.update { it.copy(isLoading = false, error = e.message ?: "Connection failed") }
+            }
+        }
+    }
+
     /** Last resort: generate a local secp256k1 keypair stored in Android Keystore. */
     fun addLocalKeyAccount() {
         _uiState.update { it.copy(isLoading = true, error = null) }
@@ -76,6 +122,9 @@ class OnboardingViewModel @Inject constructor(
             }
         }
     }
+
+    fun showNsecBunkerForm() = _uiState.update { it.copy(showNsecBunkerForm = true) }
+    fun hideNsecBunkerForm() = _uiState.update { it.copy(showNsecBunkerForm = false) }
 
     fun clearError() {
         _uiState.update { it.copy(error = null) }

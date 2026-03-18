@@ -52,7 +52,7 @@ class ComposeViewModel @Inject constructor(
             signer.signEvent(unsigned)
                 .onSuccess { event ->
                     pool.publish(event)
-                    eventRepository.save(event)
+                    eventRepository.save(event, signer.pubkey)
                     _uiState.update { it.copy(isPublishing = false) }
                     onSuccess()
                 }

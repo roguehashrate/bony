@@ -35,6 +35,17 @@ class NsecBunkerSigner(
     private val sessionSigner: LocalKeySigner, // signs the NIP-46 wrapper events
 ) : NostrSigner {
 
+    /**
+     * NIP-46 connect handshake. Call this once after construction to authenticate
+     * with the bunker and retrieve the user's actual public key.
+     * Returns the user's hex pubkey on success.
+     */
+    suspend fun handshake(): Result<String> = runCatching {
+        val connectResult = request("connect", listOf(config.sessionPubkey, config.secret)).getOrThrow()
+        check(connectResult == "ack") { "Bunker rejected connect: $connectResult" }
+        request("get_public_key", emptyList()).getOrThrow()
+    }
+
     override suspend fun signEvent(event: UnsignedEvent): Result<Event> =
         request("sign_event", listOf(unsignedEventToJson(event)))
             .mapCatching { result -> Event.fromJson(result) }

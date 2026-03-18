@@ -15,11 +15,13 @@ data class EventEntity(
     val tagsJson: String,
     val content: String,
     val sig: String,
+    /** The local account pubkey whose feed this event belongs to. */
+    val accountPubkey: String = "",
 )
 
 private val json = Json { ignoreUnknownKeys = true }
 
-fun Event.toEntity() = EventEntity(
+fun Event.toEntity(accountPubkey: String) = EventEntity(
     id = id,
     pubkey = pubkey,
     createdAt = createdAt,
@@ -27,6 +29,7 @@ fun Event.toEntity() = EventEntity(
     tagsJson = json.encodeToString(kotlinx.serialization.builtins.ListSerializer(JsonArray.serializer()), tags),
     content = content,
     sig = sig,
+    accountPubkey = accountPubkey,
 )
 
 fun EventEntity.toEvent() = Event(

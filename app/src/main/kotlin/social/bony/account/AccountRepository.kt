@@ -67,10 +67,8 @@ class AccountRepository @Inject constructor(
                 prefs[KEY_ENCRYPTED_KEYS] = json.encodeToString(keys)
             }
 
-            // First account added becomes active automatically
-            if (prefs[KEY_ACTIVE_PUBKEY] == null) {
-                prefs[KEY_ACTIVE_PUBKEY] = account.pubkey
-            }
+            // Newly added account always becomes active
+            prefs[KEY_ACTIVE_PUBKEY] = account.pubkey
         }
     }
 

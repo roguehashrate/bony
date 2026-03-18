@@ -88,7 +88,7 @@ class ThreadViewModel @Inject constructor(
                 val msg = poolMsg.message
                 when {
                     msg is RelayMessage.EventMessage && msg.event.id in missing && msg.event.verify() -> {
-                        eventRepository.save(msg.event)
+                        eventRepository.save(msg.event, "")
                         _uiState.update { state ->
                             val updated = (state.thread + msg.event)
                                 .distinctBy { it.id }
@@ -115,7 +115,7 @@ class ThreadViewModel @Inject constructor(
                 val msg = poolMsg.message
                 when {
                     msg is RelayMessage.EventMessage && msg.event.id == id && msg.event.verify() -> {
-                        eventRepository.save(msg.event)
+                        eventRepository.save(msg.event, "")
                         pool.unsubscribe(subId)
                         buildThread(msg.event)
                     }

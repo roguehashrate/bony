@@ -20,11 +20,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import social.bony.account.AccountRepository
-import social.bony.logging.LogRepository
 import social.bony.ui.compose.ComposeScreen
 import social.bony.ui.feed.FeedScreen
 import social.bony.ui.onboarding.OnboardingScreen
 import social.bony.ui.profile.ProfileScreen
+import social.bony.ui.settings.AccountManagementScreen
 import social.bony.ui.settings.SettingsScreen
 import social.bony.ui.thread.ThreadScreen
 import javax.inject.Inject
@@ -35,13 +35,14 @@ private const val ROUTE_THREAD = "thread/{eventId}"
 private const val ROUTE_COMPOSE = "compose"
 private const val ROUTE_SETTINGS = "settings"
 private const val ROUTE_PROFILE = "profile/{pubkey}"
+private const val ROUTE_ADD_ACCOUNT = "add_account"
+private const val ROUTE_ACCOUNT_MANAGEMENT = "account_management"
 
 @Composable
 fun BonyNavHost() {
     val viewModel: StartupViewModel = hiltViewModel()
     val startupState by viewModel.startupState.collectAsStateWithLifecycle()
     val navController = rememberNavController()
-    val logRepository = viewModel.logRepository
 
     when (startupState) {
         StartupState.Loading -> {
@@ -83,7 +84,23 @@ fun BonyNavHost() {
                 composable(ROUTE_SETTINGS) {
                     SettingsScreen(
                         onBack = { navController.popBackStack() },
-                        logRepository = logRepository,
+                        onAddAccount = { navController.navigate(ROUTE_ADD_ACCOUNT) },
+                        onAccountManagement = { navController.navigate(ROUTE_ACCOUNT_MANAGEMENT) },
+                    )
+                }
+                composable(ROUTE_ACCOUNT_MANAGEMENT) {
+                    AccountManagementScreen(
+                        onBack = { navController.popBackStack() },
+                        onAddAccount = { navController.navigate(ROUTE_ADD_ACCOUNT) },
+                    )
+                }
+                composable(ROUTE_ADD_ACCOUNT) {
+                    OnboardingScreen(
+                        onAccountAdded = {
+                            navController.navigate(ROUTE_FEED) {
+                                popUpTo(ROUTE_FEED) { inclusive = false }
+                            }
+                        }
                     )
                 }
                 composable(ROUTE_PROFILE) {
@@ -108,7 +125,6 @@ sealed interface StartupState {
 @HiltViewModel
 class StartupViewModel @Inject constructor(
     accountRepository: AccountRepository,
-    val logRepository: LogRepository,
 ) : ViewModel() {
     val startupState: StateFlow<StartupState> = accountRepository.activeAccount
         .map { account -> StartupState.Ready(hasAccount = account != null) }
