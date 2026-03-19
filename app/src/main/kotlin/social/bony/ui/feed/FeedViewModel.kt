@@ -40,6 +40,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import javax.inject.Inject
 
+enum class FeedTab { HOME, GLOBAL }
+
 data class FeedUiState(
     val events: List<Event> = emptyList(),
     val isLoading: Boolean = true,
@@ -63,6 +65,9 @@ class FeedViewModel @Inject constructor(
 
     val profiles: StateFlow<Map<String, ProfileContent>> = profileRepository.profiles
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
+    private val _currentFeed = MutableStateFlow(FeedTab.HOME)
+    val currentFeed: StateFlow<FeedTab> = _currentFeed.asStateFlow()
 
     private val _quotedEvents = MutableStateFlow<Map<String, Event>>(emptyMap())
     val quotedEvents: StateFlow<Map<String, Event>> = _quotedEvents.asStateFlow()
@@ -107,6 +112,16 @@ class FeedViewModel @Inject constructor(
 
     fun switchAccount(pubkey: String) {
         viewModelScope.launch { accountRepository.setActiveAccount(pubkey) }
+    }
+
+    fun switchFeed(tab: FeedTab) {
+        if (_currentFeed.value == tab) return
+        _currentFeed.update { tab }
+        val account = activeAccount.value ?: return
+        when (tab) {
+            FeedTab.HOME -> loadFeed(account)
+            FeedTab.GLOBAL -> loadGlobalFeed(account)
+        }
     }
 
     fun boost(event: Event) {
@@ -211,6 +226,39 @@ class FeedViewModel @Inject constructor(
                 feedSettled = true
                 flushBuffer()
             }
+            _uiState.update { if (it.isLoading) it.copy(isLoading = false) else it }
+        }
+    }
+
+    private fun loadGlobalFeed(account: Account) {
+        collectJob?.cancel()
+        activeSubIds.clear()
+        unsub(feedSubId); feedSubId = null
+        unsub(followSubId); followSubId = null
+        unsub(metadataSubId); metadataSubId = null
+        unsub(relayListSubId); relayListSubId = null
+
+        feedSettled = false
+        pendingBuffer.clear()
+        requestedQuoteIds.clear()
+
+        _uiState.update { it.copy(events = emptyList(), isLoading = true, error = null) }
+
+        val relays = account.relays.ifEmpty { DEFAULT_RELAYS }
+        relays.forEach { pool.addRelay(it) }
+
+        feedSubId = sub(listOf(
+            Filter(kinds = listOf(EventKind.TEXT_NOTE, EventKind.REPOST), limit = 100)
+        ))
+
+        // No follow-list phase — mark followsReceived so EOSE on feedSubId triggers flush
+        followsReceived = true
+
+        collectJob = viewModelScope.launch(Dispatchers.Default) { collectMessages() }
+
+        viewModelScope.launch {
+            delay(15_000)
+            if (!feedSettled) { feedSettled = true; flushBuffer() }
             _uiState.update { if (it.isLoading) it.copy(isLoading = false) else it }
         }
     }

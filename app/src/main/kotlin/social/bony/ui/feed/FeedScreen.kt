@@ -1,11 +1,14 @@
 package social.bony.ui.feed
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Settings
@@ -48,6 +51,7 @@ fun FeedScreen(
     viewModel: FeedViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val currentFeed by viewModel.currentFeed.collectAsStateWithLifecycle()
     val activeAccount by viewModel.activeAccount.collectAsStateWithLifecycle()
     val accounts by viewModel.accounts.collectAsStateWithLifecycle()
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
@@ -117,10 +121,26 @@ fun FeedScreen(
             }
         },
     ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding),
+        ) {
+            TabRow(selectedTabIndex = currentFeed.ordinal) {
+                Tab(
+                    selected = currentFeed == FeedTab.HOME,
+                    onClick = { viewModel.switchFeed(FeedTab.HOME) },
+                    text = { Text("Home") },
+                )
+                Tab(
+                    selected = currentFeed == FeedTab.GLOBAL,
+                    onClick = { viewModel.switchFeed(FeedTab.GLOBAL) },
+                    text = { Text("Global") },
+                )
+            }
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
                 .nestedScroll(pullToRefreshState.nestedScrollConnection),
         ) {
             when {
@@ -164,6 +184,7 @@ fun FeedScreen(
                 state = pullToRefreshState,
                 modifier = Modifier.align(Alignment.TopCenter),
             )
+        }
         }
     }
 }
