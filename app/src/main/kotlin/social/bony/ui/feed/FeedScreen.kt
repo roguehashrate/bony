@@ -22,7 +22,6 @@ import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -44,9 +43,13 @@ fun FeedScreen(
     val accounts by viewModel.accounts.collectAsStateWithLifecycle()
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
 
-    // Fresh list state per account so switching always starts at the top
-    val listState = key(activeAccount?.pubkey) { rememberLazyListState() }
+    val listState = rememberLazyListState()
     val pullToRefreshState = rememberPullToRefreshState()
+
+    // Scroll to top whenever the feed buffer is flushed (account switch or refresh)
+    LaunchedEffect(Unit) {
+        viewModel.scrollToTop.collect { listState.scrollToItem(0) }
+    }
 
     if (pullToRefreshState.isRefreshing) {
         LaunchedEffect(Unit) { viewModel.refresh() }

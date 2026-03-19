@@ -6,9 +6,12 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -25,6 +28,7 @@ import social.bony.nostr.relay.RelayMessage
 import social.bony.nostr.relay.RelayPool
 import social.bony.profile.ProfileRepository
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import javax.inject.Inject
 
 data class FeedUiState(
@@ -43,6 +47,9 @@ class FeedViewModel @Inject constructor(
 
     private val _uiState = MutableStateFlow(FeedUiState())
     val uiState: StateFlow<FeedUiState> = _uiState.asStateFlow()
+
+    private val _scrollToTop = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val scrollToTop: SharedFlow<Unit> = _scrollToTop.asSharedFlow()
 
     val profiles: StateFlow<Map<String, ProfileContent>> = profileRepository.profiles
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
@@ -63,6 +70,13 @@ class FeedViewModel @Inject constructor(
     // Only process events belonging to current subscriptions — prevents stale events
     // from old subscriptions bleeding into a newly loaded feed.
     private val activeSubIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    // Events are buffered until the feed is "settled" (follow list processed + EOSE
+    // on the expanded subscription), then flushed all at once so the feed snaps into
+    // place rather than trickling in one-by-one. After settling, live events stream in.
+    @Volatile private var feedSettled = false
+    @Volatile private var followsReceived = false
+    private val pendingBuffer = ConcurrentLinkedQueue<Event>()
 
     init {
         viewModelScope.launch {
@@ -90,6 +104,10 @@ class FeedViewModel @Inject constructor(
         unsub(followSubId); followSubId = null
         unsub(metadataSubId); metadataSubId = null
         unsub(relayListSubId); relayListSubId = null
+
+        feedSettled = false
+        followsReceived = false
+        pendingBuffer.clear()
 
         _uiState.update {
             if (clearEvents) it.copy(events = emptyList(), isLoading = true, error = null)
@@ -122,7 +140,8 @@ class FeedViewModel @Inject constructor(
         val relays = account.relays.ifEmpty { DEFAULT_RELAYS }
         relays.forEach { pool.addRelay(it) }
 
-        // Show own notes immediately while the follow list loads
+        // Own notes first; events buffer until EOSE, then the follow list subscription
+        // replaces this and buffers again until its own EOSE — feed appears atomically.
         feedSubId = sub(listOf(
             Filter(
                 authors = listOf(account.pubkey),
@@ -144,9 +163,13 @@ class FeedViewModel @Inject constructor(
 
         collectJob = viewModelScope.launch(Dispatchers.Default) { collectMessages() }
 
-        // Safety net: clear spinner after 15s regardless
+        // Safety net: flush buffer and clear spinner after 15s regardless
         viewModelScope.launch {
             delay(15_000)
+            if (!feedSettled) {
+                feedSettled = true
+                flushBuffer()
+            }
             _uiState.update { if (it.isLoading) it.copy(isLoading = false) else it }
         }
     }
@@ -171,6 +194,19 @@ class FeedViewModel @Inject constructor(
                 }
                 is RelayMessage.EndOfStoredEvents -> {
                     if (msg.subscriptionId !in activeSubIds) return@collect
+                    when {
+                        // Expanded feed (after follow list) is ready — show everything.
+                        msg.subscriptionId == feedSubId && followsReceived && !feedSettled -> {
+                            feedSettled = true
+                            flushBuffer()
+                        }
+                        // Follow subscription returned nothing (user has no follows) —
+                        // fall back to showing own notes.
+                        msg.subscriptionId == followSubId && !followsReceived && !feedSettled -> {
+                            feedSettled = true
+                            flushBuffer()
+                        }
+                    }
                     _uiState.update { it.copy(isLoading = false) }
                 }
                 else -> Unit
@@ -216,7 +252,10 @@ class FeedViewModel @Inject constructor(
         val selfPubkey = activeAccount.value?.pubkey ?: return
         val allPubkeys = (followed + selfPubkey).distinct()
 
+        // Follow list received — expand to full feed and wait for its EOSE.
+        followsReceived = true
         unsub(feedSubId)
+        feedSettled = false
         feedSubId = sub(listOf(
             Filter(
                 authors = allPubkeys,
@@ -259,12 +298,29 @@ class FeedViewModel @Inject constructor(
     private fun addToFeed(event: Event) {
         val accountPubkey = activeAccount.value?.pubkey ?: return
         viewModelScope.launch { eventRepository.save(event, accountPubkey) }
+        if (!feedSettled) {
+            pendingBuffer.add(event)
+            return
+        }
         _uiState.update { state ->
             val updated = (state.events + event)
                 .distinctBy { it.id }
                 .sortedByDescending { it.createdAt }
             state.copy(events = updated)
         }
+    }
+
+    /** Flush buffered events into the UI all at once, sorted by recency, then scroll to top. */
+    private fun flushBuffer() {
+        val events = pendingBuffer.toList().also { pendingBuffer.clear() }
+        if (events.isEmpty()) return
+        _uiState.update { state ->
+            val merged = (state.events + events)
+                .distinctBy { it.id }
+                .sortedByDescending { it.createdAt }
+            state.copy(events = merged)
+        }
+        _scrollToTop.tryEmit(Unit)
     }
 
     private fun clearFeed() {
