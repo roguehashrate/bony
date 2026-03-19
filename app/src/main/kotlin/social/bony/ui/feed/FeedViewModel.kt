@@ -25,6 +25,7 @@ import social.bony.nostr.Filter
 import social.bony.nostr.ProfileContent
 import social.bony.nostr.pubkeys
 import social.bony.nostr.quotedEventId
+import social.bony.ui.feed.extractInlineQuoteId
 import social.bony.nostr.relay.RelayMessage
 import social.bony.nostr.relay.RelayPool
 import social.bony.nostr.relay.RelayStatus
@@ -348,6 +349,7 @@ class FeedViewModel @Inject constructor(
                     if (embedded != null && embedded.verify()) {
                         _quotedEvents.update { it + (embedded.id to embedded) }
                         viewModelScope.launch { eventRepository.save(embedded, "") }
+                        fetchMetadataForAuthors(listOf(embedded.pubkey))
                     } else {
                         // Fall back to fetching by e tag
                         val refId = event.parsedTags.firstOrNull { it.name == "e" }?.value()
@@ -356,6 +358,7 @@ class FeedViewModel @Inject constructor(
                 }
                 EventKind.TEXT_NOTE -> {
                     val qId = event.parsedTags.quotedEventId
+                        ?: extractInlineQuoteId(event.content)
                     if (qId != null && qId !in requestedQuoteIds) toResolve.add(qId)
                 }
             }
@@ -367,11 +370,14 @@ class FeedViewModel @Inject constructor(
 
         viewModelScope.launch {
             val cached = eventRepository.getByIds(missing).associateBy { it.id }
-            if (cached.isNotEmpty()) _quotedEvents.update { it + cached }
+            if (cached.isNotEmpty()) {
+                _quotedEvents.update { it + cached }
+                fetchMetadataForAuthors(cached.values.map { it.pubkey })
+            }
             val stillMissing = missing.filter { it !in cached }
             if (stillMissing.isEmpty()) return@launch
 
-            val subId = sub(listOf(Filter(ids = stillMissing, kinds = listOf(EventKind.TEXT_NOTE))))
+            val subId = pool.subscribe(listOf(Filter(ids = stillMissing, kinds = listOf(EventKind.TEXT_NOTE))))
             pool.messages.collect { poolMsg ->
                 val msg = poolMsg.message
                 if (msg is RelayMessage.EventMessage
@@ -381,12 +387,19 @@ class FeedViewModel @Inject constructor(
                 ) {
                     eventRepository.save(msg.event, "")
                     _quotedEvents.update { it + (msg.event.id to msg.event) }
+                    fetchMetadataForAuthors(listOf(msg.event.pubkey))
                 }
                 if (msg is RelayMessage.EndOfStoredEvents && msg.subscriptionId == subId) {
                     pool.unsubscribe(subId)
                 }
             }
         }
+    }
+
+    private fun fetchMetadataForAuthors(pubkeys: List<String>) {
+        val unknown = pubkeys.distinct().filter { profileRepository.profiles.value[it] == null }
+        if (unknown.isEmpty()) return
+        sub(listOf(Filter(authors = unknown, kinds = listOf(EventKind.METADATA))))
     }
 
     private fun clearFeed() {

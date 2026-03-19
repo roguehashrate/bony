@@ -30,11 +30,14 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import social.bony.nostr.Nip19
 
 private val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "gif", "webp", "bmp")
 private val VIDEO_EXTENSIONS = setOf("mp4", "webm", "mov", "m4v", "mkv")
 private val URL_REGEX = Regex("""https?://\S+""")
-private val NOSTR_URI_REGEX = Regex("""nostr:(note1|nevent1)\S+""")
+
+// Matches any nostr: URI — note1, nevent1, npub1, nprofile1, naddr1, etc.
+private val NOSTR_URI_REGEX = Regex("""nostr:(note1|nevent1|npub1|nprofile1|naddr1)\S*""")
 
 sealed class MediaItem {
     data class Image(val url: String) : MediaItem()
@@ -46,13 +49,34 @@ data class ParsedContent(
     val mediaItems: List<MediaItem>,
 )
 
-fun parseNoteContent(content: String, stripNostrUris: Boolean = false): ParsedContent {
+/**
+ * Scans note content for an inline nostr:note1… or nostr:nevent1… reference
+ * and returns the decoded hex event ID, for use as a fallback when no q-tag is present.
+ */
+fun extractInlineQuoteId(content: String): String? =
+    NOSTR_URI_REGEX.find(content)
+        ?.value
+        ?.let { Nip19.nostrUriToEventId(it) }
+
+fun parseNoteContent(content: String): ParsedContent {
     val mediaItems = mutableListOf<MediaItem>()
 
-    // Strip nostr: URIs first (they render as embedded quote cards)
-    val withoutNostrUris = if (stripNostrUris)
-        NOSTR_URI_REGEX.replace(content, "")
-    else content
+    // Replace all nostr: URIs:
+    //   - note1/nevent1 → stripped (they render as embedded quote cards)
+    //   - npub1/nprofile1 → @npub12345…abcdef (abbreviated @mention)
+    //   - naddr1 and others → stripped
+    val withoutNostrUris = NOSTR_URI_REGEX.replace(content) { match ->
+        val entity = match.value.removePrefix("nostr:")
+        when {
+            entity.startsWith("npub1") -> {
+                val hex = Nip19.npubToHex(entity)
+                if (hex != null) "@${Nip19.hexToNpub(hex).let { "${it.take(9)}…${it.takeLast(4)}" }}"
+                else ""
+            }
+            entity.startsWith("nprofile1") -> "" // no easy abbreviation, just strip
+            else -> "" // note1, nevent1, naddr1 — stripped, rendered as embedded card
+        }
+    }
 
     val text = URL_REGEX.replace(withoutNostrUris) { match ->
         val url = match.value

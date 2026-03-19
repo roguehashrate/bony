@@ -29,6 +29,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import social.bony.nostr.quotedEventId
 import social.bony.ui.components.AccountSwitcher
+import social.bony.ui.feed.extractInlineQuoteId
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -121,6 +122,7 @@ fun FeedScreen(
                                         social.bony.nostr.EventKind.REPOST ->
                                             event.parsedTags.firstOrNull { it.name == "e" }?.value()
                                         else -> event.parsedTags.quotedEventId
+                                            ?: extractInlineQuoteId(event.content)
                                     }
                                     refId?.let { quotedEvents[it] }
                                 },

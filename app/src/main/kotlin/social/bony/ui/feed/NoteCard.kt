@@ -181,9 +181,8 @@ fun NoteCard(
         Spacer(Modifier.height(8.dp))
 
         val hasQuote = event.parsedTags.quotedEventId != null
-        val parsed = remember(event.content, hasQuote) {
-            parseNoteContent(event.content, stripNostrUris = hasQuote)
-        }
+            || extractInlineQuoteId(event.content) != null
+        val parsed = remember(event.content) { parseNoteContent(event.content) }
 
         if (parsed.text.isNotEmpty()) {
             Text(

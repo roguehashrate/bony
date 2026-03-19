@@ -31,6 +31,7 @@ import social.bony.nostr.EventKind
 import social.bony.nostr.ProfileContent
 import social.bony.nostr.quotedEventId
 import social.bony.ui.feed.NoteCard
+import social.bony.ui.feed.extractInlineQuoteId
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -99,6 +100,7 @@ fun ThreadScreen(
                                         EventKind.REPOST ->
                                             item.event.parsedTags.firstOrNull { it.name == "e" }?.value()
                                         else -> item.event.parsedTags.quotedEventId
+                                            ?: extractInlineQuoteId(item.event.content)
                                     }
                                     refId?.let { quotedEvents[it] }
                                 },

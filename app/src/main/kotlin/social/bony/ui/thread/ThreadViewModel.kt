@@ -19,6 +19,7 @@ import social.bony.nostr.Filter
 import social.bony.nostr.ProfileContent
 import social.bony.nostr.quotedEventId
 import social.bony.nostr.relay.RelayMessage
+import social.bony.ui.feed.extractInlineQuoteId
 import social.bony.nostr.relay.RelayPool
 import social.bony.nostr.replyEventId
 import social.bony.nostr.rootEventId
@@ -177,18 +178,23 @@ class ThreadViewModel @Inject constructor(
         viewModelScope.launch {
             pool.messages.collect { poolMsg ->
                 val msg = poolMsg.message
-                if (msg is RelayMessage.EventMessage
-                    && msg.subscriptionId == subId
-                    && msg.event.verify()
-                ) {
-                    eventRepository.save(msg.event, "")
-                    _uiState.update { state ->
-                        val updated = (state.replies + msg.event)
-                            .distinctBy { it.id }
-                            .sortedBy { it.createdAt }
-                        state.copy(replies = updated)
+                if (msg is RelayMessage.EventMessage && msg.event.verify()) {
+                    when {
+                        msg.subscriptionId == subId -> {
+                            eventRepository.save(msg.event, "")
+                            _uiState.update { state ->
+                                val updated = (state.replies + msg.event)
+                                    .distinctBy { it.id }
+                                    .sortedBy { it.createdAt }
+                                state.copy(replies = updated)
+                            }
+                            fetchQuotesForEvents(listOf(msg.event))
+                        }
+                        msg.event.kind == EventKind.METADATA -> {
+                            // Process any metadata events arriving while thread is open
+                            profileRepository.processEvent(msg.event)
+                        }
                     }
-                    fetchQuotesForEvents(listOf(msg.event))
                 }
             }
         }
@@ -213,6 +219,7 @@ class ThreadViewModel @Inject constructor(
                     }
                 }
                 EventKind.TEXT_NOTE -> event.parsedTags.quotedEventId
+                    ?: extractInlineQuoteId(event.content)
                 else -> null
             }
         }.distinct().filter { it !in _quotedEvents.value }
@@ -221,7 +228,10 @@ class ThreadViewModel @Inject constructor(
 
         viewModelScope.launch {
             val cached = eventRepository.getByIds(quoteIds).associateBy { it.id }
-            if (cached.isNotEmpty()) _quotedEvents.update { it + cached }
+            if (cached.isNotEmpty()) {
+                _quotedEvents.update { it + cached }
+                fetchMetadataForAuthors(cached.values.map { it.pubkey })
+            }
             val missing = quoteIds.filter { it !in cached }
             if (missing.isEmpty()) return@launch
 
@@ -235,11 +245,18 @@ class ThreadViewModel @Inject constructor(
                 ) {
                     eventRepository.save(msg.event, "")
                     _quotedEvents.update { it + (msg.event.id to msg.event) }
+                    fetchMetadataForAuthors(listOf(msg.event.pubkey))
                 }
                 if (msg is RelayMessage.EndOfStoredEvents && msg.subscriptionId == subId) {
                     pool.unsubscribe(subId)
                 }
             }
         }
+    }
+
+    private fun fetchMetadataForAuthors(pubkeys: List<String>) {
+        val unknown = pubkeys.distinct().filter { profileRepository.profiles.value[it] == null }
+        if (unknown.isEmpty()) return
+        pool.subscribe(listOf(Filter(authors = unknown, kinds = listOf(EventKind.METADATA))))
     }
 }
