@@ -62,6 +62,27 @@ object Nip19 {
         null
     }.getOrNull()
 
+    /**
+     * Decodes an nprofile1… string to the 64-char hex pubkey it encodes.
+     * nprofile1 uses TLV encoding; type 0 (special) is the 32-byte pubkey.
+     */
+    fun nprofileToHex(input: String): String? = runCatching {
+        val bech32 = input.removePrefix("nostr:").lowercase()
+        val (hrp, bytes) = decode(bech32) ?: return null
+        if (hrp != "nprofile") return null
+        var i = 0
+        while (i + 1 < bytes.size) {
+            val type = bytes[i].toInt() and 0xFF
+            val len  = bytes[i + 1].toInt() and 0xFF
+            i += 2
+            if (type == 0 && len == 32 && i + len <= bytes.size) {
+                return bytes.sliceArray(i until i + len).toHex()
+            }
+            i += len
+        }
+        null
+    }.getOrNull()
+
     /** Extracts a hex event ID from a nostr:note1… or nostr:nevent1… URI. */
     fun nostrUriToEventId(uri: String): String? = when {
         uri.contains("nevent1") -> neventToHex(uri)

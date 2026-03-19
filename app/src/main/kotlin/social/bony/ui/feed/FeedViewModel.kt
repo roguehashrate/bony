@@ -166,7 +166,10 @@ class FeedViewModel @Inject constructor(
                             .sortedByDescending { it.createdAt }
                         state.copy(events = merged)
                     }
-                    val cachedPubkeys = cached.map { it.pubkey }.distinct()
+                    val cachedPubkeys = (cached.map { it.pubkey } +
+                        cached.filter { it.kind == EventKind.TEXT_NOTE }
+                            .flatMap { it.parsedTags.pubkeys }
+                        ).distinct()
                     unsub(metadataSubId)
                     metadataSubId = sub(listOf(
                         Filter(authors = cachedPubkeys, kinds = listOf(EventKind.METADATA))
@@ -347,6 +350,7 @@ class FeedViewModel @Inject constructor(
             state.copy(events = updated)
         }
         fetchQuotesForEvents(listOf(event))
+        fetchProfilesForMentions(listOf(event))
     }
 
     /** Flush buffered events into the UI all at once, sorted by recency, then scroll to top. */
@@ -361,6 +365,7 @@ class FeedViewModel @Inject constructor(
         }
         _scrollToTop.tryEmit(Unit)
         fetchQuotesForEvents(events)
+        fetchProfilesForMentions(events)
     }
 
     private fun fetchQuotesForEvents(events: List<Event>) {
@@ -425,6 +430,14 @@ class FeedViewModel @Inject constructor(
         val unknown = pubkeys.distinct().filter { profileRepository.profiles.value[it] == null }
         if (unknown.isEmpty()) return
         sub(listOf(Filter(authors = unknown, kinds = listOf(EventKind.METADATA))))
+    }
+
+    /** Fetch kind-0 for any pubkeys mentioned via p-tags in text notes. */
+    private fun fetchProfilesForMentions(events: List<Event>) {
+        val mentioned = events
+            .filter { it.kind == EventKind.TEXT_NOTE }
+            .flatMap { it.parsedTags.pubkeys }
+        fetchMetadataForAuthors(mentioned)
     }
 
     private fun clearFeed() {

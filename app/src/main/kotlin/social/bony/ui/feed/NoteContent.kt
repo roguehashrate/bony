@@ -31,6 +31,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import social.bony.nostr.Nip19
+import social.bony.nostr.ProfileContent
 
 private val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "gif", "webp", "bmp")
 private val VIDEO_EXTENSIONS = setOf("mp4", "webm", "mov", "m4v", "mkv")
@@ -58,22 +59,29 @@ fun extractInlineQuoteId(content: String): String? =
         ?.value
         ?.let { Nip19.nostrUriToEventId(it) }
 
-fun parseNoteContent(content: String): ParsedContent {
+fun parseNoteContent(
+    content: String,
+    profiles: Map<String, ProfileContent> = emptyMap(),
+): ParsedContent {
     val mediaItems = mutableListOf<MediaItem>()
 
     // Replace all nostr: URIs:
     //   - note1/nevent1 → stripped (they render as embedded quote cards)
-    //   - npub1/nprofile1 → @npub12345…abcdef (abbreviated @mention)
+    //   - npub1/nprofile1 → @DisplayName or @npub12345…abcdef
     //   - naddr1 and others → stripped
     val withoutNostrUris = NOSTR_URI_REGEX.replace(content) { match ->
         val entity = match.value.removePrefix("nostr:")
         when {
             entity.startsWith("npub1") -> {
                 val hex = Nip19.npubToHex(entity)
-                if (hex != null) "@${Nip19.hexToNpub(hex).let { "${it.take(9)}…${it.takeLast(4)}" }}"
+                if (hex != null) "@${profiles[hex]?.bestName ?: abbreviateNpub(hex)}"
                 else ""
             }
-            entity.startsWith("nprofile1") -> "" // no easy abbreviation, just strip
+            entity.startsWith("nprofile1") -> {
+                val hex = Nip19.nprofileToHex(entity)
+                if (hex != null) "@${profiles[hex]?.bestName ?: abbreviateNpub(hex)}"
+                else ""
+            }
             else -> "" // note1, nevent1, naddr1 — stripped, rendered as embedded card
         }
     }
@@ -91,6 +99,9 @@ fun parseNoteContent(content: String): ParsedContent {
 
     return ParsedContent(text, mediaItems)
 }
+
+private fun abbreviateNpub(hex: String): String =
+    Nip19.hexToNpub(hex).let { "${it.take(9)}…${it.takeLast(4)}" }
 
 @Composable
 fun NoteMediaContent(mediaItems: List<MediaItem>, modifier: Modifier = Modifier) {
