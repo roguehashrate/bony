@@ -4,14 +4,16 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -20,8 +22,12 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import social.bony.nostr.Event
+import social.bony.nostr.ProfileContent
 import social.bony.ui.feed.NoteCard
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -29,15 +35,27 @@ import social.bony.ui.feed.NoteCard
 fun ThreadScreen(
     onBack: () -> Unit,
     onProfileClick: (pubkey: String) -> Unit = {},
+    onThreadClick: (eventId: String) -> Unit = {},
     viewModel: ThreadViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
 
-    // Scroll to the focused event once the thread loads
-    LaunchedEffect(uiState.thread, uiState.focusedEventId) {
-        val index = uiState.thread.indexOfFirst { it.id == uiState.focusedEventId }
+    // Build display list: [root?, gap?, parent?, focused, replies...]
+    val items = buildList {
+        uiState.root?.let { add(ThreadItem.Note(it)) }
+        if (uiState.showGap) add(ThreadItem.Gap)
+        uiState.parent?.let { add(ThreadItem.Note(it)) }
+        uiState.focused?.let { add(ThreadItem.Note(it, focused = true)) }
+        uiState.replies.forEach { add(ThreadItem.Note(it)) }
+    }
+
+    // Scroll to the focused note once it appears
+    LaunchedEffect(items.size, uiState.focusedEventId) {
+        val index = items.indexOfFirst {
+            it is ThreadItem.Note && it.event.id == uiState.focusedEventId
+        }
         if (index >= 0) listState.animateScrollToItem(index)
     }
 
@@ -54,13 +72,11 @@ fun ThreadScreen(
         }
     ) { padding ->
         when {
-            uiState.isLoading && uiState.thread.isEmpty() -> {
+            uiState.isLoading && items.isEmpty() -> {
                 Box(
                     modifier = Modifier.fillMaxSize().padding(padding),
                     contentAlignment = Alignment.Center,
-                ) {
-                    CircularProgressIndicator()
-                }
+                ) { CircularProgressIndicator() }
             }
 
             else -> {
@@ -68,17 +84,47 @@ fun ThreadScreen(
                     state = listState,
                     modifier = Modifier.fillMaxSize().padding(padding),
                 ) {
-                    items(uiState.thread, key = { it.id }) { event ->
-                        NoteCard(
-                            event = event,
-                            profile = profiles[event.pubkey],
-                            profiles = profiles,
-                            highlighted = event.id == uiState.focusedEventId,
-                            onProfileClick = onProfileClick,
-                        )
+                    itemsIndexed(items, key = { _, item -> item.key }) { _, item ->
+                        when (item) {
+                            is ThreadItem.Note -> NoteCard(
+                                event = item.event,
+                                profile = profiles[item.event.pubkey],
+                                profiles = profiles,
+                                highlighted = item.focused,
+                                onThreadClick = onThreadClick,
+                                onProfileClick = onProfileClick,
+                            )
+                            ThreadItem.Gap -> GapIndicator()
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun GapIndicator() {
+    Text(
+        text = "· · ·",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = TextAlign.Center,
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(vertical = 6.dp, horizontal = 72.dp),
+    )
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+}
+
+private sealed interface ThreadItem {
+    val key: Any
+
+    data class Note(val event: Event, val focused: Boolean = false) : ThreadItem {
+        override val key get() = event.id
+    }
+
+    data object Gap : ThreadItem {
+        override val key get() = "gap"
     }
 }

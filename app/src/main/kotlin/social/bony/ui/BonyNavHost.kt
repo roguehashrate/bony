@@ -79,6 +79,7 @@ fun BonyNavHost() {
                     ThreadScreen(
                         onBack = { navController.popBackStack() },
                         onProfileClick = { pubkey -> navController.navigate("profile/$pubkey") },
+                        onThreadClick = { eventId -> navController.navigate("thread/$eventId") },
                     )
                 }
                 composable(ROUTE_COMPOSE) {

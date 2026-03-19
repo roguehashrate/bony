@@ -119,14 +119,26 @@ fun NoteCard(
 
         Spacer(Modifier.height(8.dp))
 
-        Text(
-            text = event.content,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurface,
-            overflow = TextOverflow.Ellipsis,
-            maxLines = 12,
-            modifier = Modifier.padding(start = 50.dp),
-        )
+        val parsed = remember(event.content) { parseNoteContent(event.content) }
+
+        if (parsed.text.isNotEmpty()) {
+            Text(
+                text = parsed.text,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                overflow = TextOverflow.Ellipsis,
+                maxLines = 12,
+                modifier = Modifier.padding(start = 50.dp),
+            )
+        }
+
+        if (parsed.mediaItems.isNotEmpty()) {
+            Spacer(Modifier.height(if (parsed.text.isNotEmpty()) 8.dp else 0.dp))
+            NoteMediaContent(
+                mediaItems = parsed.mediaItems,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
     }
 
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)

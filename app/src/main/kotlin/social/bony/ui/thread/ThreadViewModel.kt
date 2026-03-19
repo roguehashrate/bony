@@ -17,16 +17,21 @@ import social.bony.nostr.Event
 import social.bony.nostr.EventKind
 import social.bony.nostr.Filter
 import social.bony.nostr.ProfileContent
-import social.bony.nostr.eventIds
 import social.bony.nostr.relay.RelayMessage
 import social.bony.nostr.relay.RelayPool
+import social.bony.nostr.replyEventId
+import social.bony.nostr.rootEventId
 import social.bony.profile.ProfileRepository
 import javax.inject.Inject
 
 data class ThreadUiState(
-    val thread: List<Event> = emptyList(),
-    val focusedEventId: String = "",
+    val root: Event? = null,       // root of the thread (may be null if top-level or not found)
+    val parent: Event? = null,     // direct parent of focused (null if root == parent or top-level)
+    val focused: Event? = null,    // the note that was tapped
+    val replies: List<Event> = emptyList(),
+    val showGap: Boolean = false,  // true when root ≠ parent, indicating hidden intermediate replies
     val isLoading: Boolean = true,
+    val focusedEventId: String = "",
 )
 
 @HiltViewModel
@@ -49,79 +54,130 @@ class ThreadViewModel @Inject constructor(
         viewModelScope.launch(Dispatchers.Default) { loadThread() }
     }
 
+    // ── Loading ───────────────────────────────────────────────────────────────
+
     private suspend fun loadThread() {
-        val focusedEvent = eventRepository.getById(eventId) ?: run {
-            // Not cached — fetch from relay
-            fetchEventFromRelay(eventId)
+        val focused = eventRepository.getById(eventId) ?: run {
+            fetchFocusedFromRelay()
             return
         }
-        buildThread(focusedEvent)
+        _uiState.update { it.copy(focused = focused) }
+        loadContext(focused)
     }
 
-    private fun buildThread(focusedEvent: Event) {
-        val parentIds = focusedEvent.parsedTags.eventIds
-        if (parentIds.isEmpty()) {
-            _uiState.update { it.copy(thread = listOf(focusedEvent), isLoading = false) }
-            return
-        }
-
-        viewModelScope.launch {
-            val localParents = eventRepository.getByIds(parentIds).associateBy { it.id }
-            val missing = parentIds.filter { it !in localParents }
-
-            val initialThread = (localParents.values + focusedEvent)
-                .distinctBy { it.id }
-                .sortedBy { it.createdAt }
-            _uiState.update { it.copy(thread = initialThread) }
-
-            if (missing.isEmpty()) {
-                _uiState.update { it.copy(isLoading = false) }
-                fetchProfiles(initialThread)
-                return@launch
-            }
-
-            val subId = pool.subscribe(listOf(
-                Filter(ids = missing, kinds = listOf(EventKind.TEXT_NOTE, EventKind.REPOST))
-            ))
-
-            pool.messages.collect { poolMsg ->
-                val msg = poolMsg.message
-                when {
-                    msg is RelayMessage.EventMessage && msg.event.id in missing && msg.event.verify() -> {
-                        eventRepository.save(msg.event, "")
-                        _uiState.update { state ->
-                            val updated = (state.thread + msg.event)
-                                .distinctBy { it.id }
-                                .sortedBy { it.createdAt }
-                            state.copy(thread = updated)
-                        }
-                    }
-                    msg is RelayMessage.EndOfStoredEvents -> {
-                        _uiState.update { it.copy(isLoading = false) }
-                        pool.unsubscribe(subId)
-                        fetchProfiles(_uiState.value.thread)
-                    }
+    /** Fetch the focused event from relay when it's not in the local cache. */
+    private suspend fun fetchFocusedFromRelay() {
+        val subId = pool.subscribe(listOf(
+            Filter(ids = listOf(eventId), kinds = listOf(EventKind.TEXT_NOTE))
+        ))
+        pool.messages.collect { poolMsg ->
+            val msg = poolMsg.message
+            when {
+                msg is RelayMessage.EventMessage
+                    && msg.subscriptionId == subId
+                    && msg.event.id == eventId
+                    && msg.event.verify() -> {
+                    pool.unsubscribe(subId)
+                    eventRepository.save(msg.event, "")
+                    _uiState.update { it.copy(focused = msg.event) }
+                    loadContext(msg.event)
+                }
+                msg is RelayMessage.EndOfStoredEvents && msg.subscriptionId == subId -> {
+                    pool.unsubscribe(subId)
+                    _uiState.update { it.copy(isLoading = false) }
                 }
             }
         }
     }
 
-    private fun fetchEventFromRelay(id: String) {
+    /**
+     * Loads the thread context for the focused event:
+     * - root: the root of the conversation (NIP-10 "root" marker)
+     * - parent: the direct reply target (NIP-10 "reply" marker), if different from root
+     *
+     * Also starts the live replies subscription.
+     */
+    private suspend fun loadContext(focused: Event) {
+        val rootId = focused.parsedTags.rootEventId
+        val replyId = focused.parsedTags.replyEventId
+
+        // Treat parent as distinct from root only if they differ
+        val parentId = replyId?.takeIf { it != rootId }
+        val toFetch = listOfNotNull(rootId, parentId).distinct()
+
+        if (toFetch.isEmpty()) {
+            // Top-level note — no context above it
+            _uiState.update { it.copy(isLoading = false) }
+            subscribeReplies()
+            fetchProfiles(listOf(focused))
+            return
+        }
+
+        // Seed from cache
+        val cached = eventRepository.getByIds(toFetch).associateBy { it.id }
+        _uiState.update { state ->
+            state.copy(
+                root = rootId?.let { cached[it] },
+                parent = parentId?.let { cached[it] },
+                showGap = rootId != null && parentId != null,
+            )
+        }
+
+        val missing = toFetch.filter { it !in cached }
+        if (missing.isEmpty()) {
+            _uiState.update { it.copy(isLoading = false) }
+            subscribeReplies()
+            fetchProfiles(listOfNotNull(_uiState.value.root, _uiState.value.parent, focused))
+            return
+        }
+
         val subId = pool.subscribe(listOf(
-            Filter(ids = listOf(id), kinds = listOf(EventKind.TEXT_NOTE, EventKind.REPOST))
+            Filter(ids = missing, kinds = listOf(EventKind.TEXT_NOTE))
+        ))
+        pool.messages.collect { poolMsg ->
+            val msg = poolMsg.message
+            when {
+                msg is RelayMessage.EventMessage
+                    && msg.subscriptionId == subId
+                    && msg.event.id in missing
+                    && msg.event.verify() -> {
+                    eventRepository.save(msg.event, "")
+                    _uiState.update { state ->
+                        state.copy(
+                            root = if (msg.event.id == rootId) msg.event else state.root,
+                            parent = if (msg.event.id == parentId) msg.event else state.parent,
+                        )
+                    }
+                }
+                msg is RelayMessage.EndOfStoredEvents && msg.subscriptionId == subId -> {
+                    pool.unsubscribe(subId)
+                    _uiState.update { it.copy(isLoading = false) }
+                    val state = _uiState.value
+                    subscribeReplies()
+                    fetchProfiles(listOfNotNull(state.root, state.parent, focused))
+                }
+            }
+        }
+    }
+
+    /** Subscribe to live replies targeting the focused event. */
+    private fun subscribeReplies() {
+        val subId = pool.subscribe(listOf(
+            Filter(eTags = listOf(eventId), kinds = listOf(EventKind.TEXT_NOTE), limit = 50)
         ))
         viewModelScope.launch {
             pool.messages.collect { poolMsg ->
                 val msg = poolMsg.message
-                when {
-                    msg is RelayMessage.EventMessage && msg.event.id == id && msg.event.verify() -> {
-                        eventRepository.save(msg.event, "")
-                        pool.unsubscribe(subId)
-                        buildThread(msg.event)
-                    }
-                    msg is RelayMessage.EndOfStoredEvents -> {
-                        _uiState.update { it.copy(isLoading = false) }
-                        pool.unsubscribe(subId)
+                if (msg is RelayMessage.EventMessage
+                    && msg.subscriptionId == subId
+                    && msg.event.verify()
+                ) {
+                    eventRepository.save(msg.event, "")
+                    _uiState.update { state ->
+                        val updated = (state.replies + msg.event)
+                            .distinctBy { it.id }
+                            .sortedBy { it.createdAt }
+                        state.copy(replies = updated)
                     }
                 }
             }
@@ -130,8 +186,6 @@ class ThreadViewModel @Inject constructor(
 
     private fun fetchProfiles(events: List<Event>) {
         val pubkeys = events.map { it.pubkey }.distinct()
-        pool.subscribe(listOf(
-            Filter(authors = pubkeys, kinds = listOf(EventKind.METADATA))
-        ))
+        pool.subscribe(listOf(Filter(authors = pubkeys, kinds = listOf(EventKind.METADATA))))
     }
 }
