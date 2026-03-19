@@ -64,6 +64,12 @@ val List<Tag>.replyEventId: String?
     }
 
 /**
+ * NIP-18: the quoted event ID for quote-notes (kind-1 with a "q" tag).
+ */
+val List<Tag>.quotedEventId: String?
+    get() = firstOrNull { it.name == "q" }?.value()
+
+/**
  * NIP-10: the root event ID of the thread.
  * Prefers the "root" marker; falls back to positional (first e-tag when >1).
  */

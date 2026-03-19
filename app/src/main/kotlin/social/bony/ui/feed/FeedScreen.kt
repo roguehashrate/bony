@@ -27,6 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import social.bony.nostr.quotedEventId
 import social.bony.ui.components.AccountSwitcher
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -44,6 +45,7 @@ fun FeedScreen(
     val accounts by viewModel.accounts.collectAsStateWithLifecycle()
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
     val relayStatuses by viewModel.relayStatuses.collectAsStateWithLifecycle()
+    val quotedEvents by viewModel.quotedEvents.collectAsStateWithLifecycle()
 
     val listState = rememberLazyListState()
     val pullToRefreshState = rememberPullToRefreshState()
@@ -114,6 +116,14 @@ fun FeedScreen(
                                 event = event,
                                 profile = profiles[event.pubkey],
                                 profiles = profiles,
+                                quotedEvent = run {
+                                    val refId = when (event.kind) {
+                                        social.bony.nostr.EventKind.REPOST ->
+                                            event.parsedTags.firstOrNull { it.name == "e" }?.value()
+                                        else -> event.parsedTags.quotedEventId
+                                    }
+                                    refId?.let { quotedEvents[it] }
+                                },
                                 onThreadClick = onThreadClick,
                                 onProfileClick = onProfileClick,
                             )

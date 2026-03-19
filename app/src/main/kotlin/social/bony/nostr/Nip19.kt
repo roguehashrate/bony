@@ -28,6 +28,45 @@ object Nip19 {
         s.startsWith("nprofile1") || s.startsWith("nevent1")
 
     /**
+     * Decodes a note1… or nostr:note1… string to a 64-char hex event ID.
+     * note1 is simple bech32 with hrp="note" and 32-byte payload.
+     */
+    fun noteToHex(input: String): String? = runCatching {
+        val bech32 = input.removePrefix("nostr:").lowercase()
+        val (hrp, bytes) = decode(bech32) ?: return null
+        if (hrp != "note" || bytes.size != 32) return null
+        bytes.toHex()
+    }.getOrNull()
+
+    /**
+     * Decodes a nevent1… or nostr:nevent1… string to a 64-char hex event ID.
+     * nevent1 uses TLV encoding; type 0 (special) is the 32-byte event ID.
+     */
+    fun neventToHex(input: String): String? = runCatching {
+        val bech32 = input.removePrefix("nostr:").lowercase()
+        val (hrp, bytes) = decode(bech32) ?: return null
+        if (hrp != "nevent") return null
+        var i = 0
+        while (i + 1 < bytes.size) {
+            val type = bytes[i].toInt() and 0xFF
+            val len  = bytes[i + 1].toInt() and 0xFF
+            i += 2
+            if (type == 0 && len == 32 && i + len <= bytes.size) {
+                return bytes.sliceArray(i until i + len).toHex()
+            }
+            i += len
+        }
+        null
+    }.getOrNull()
+
+    /** Extracts a hex event ID from a nostr:note1… or nostr:nevent1… URI. */
+    fun nostrUriToEventId(uri: String): String? = when {
+        uri.contains("nevent1") -> neventToHex(uri)
+        uri.contains("note1")   -> noteToHex(uri)
+        else -> null
+    }
+
+    /**
      * Normalises a pubkey to hex regardless of whether it arrived as npub or hex.
      * Returns null if the input is not a valid pubkey in either format.
      */

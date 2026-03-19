@@ -24,6 +24,7 @@ import social.bony.nostr.EventKind
 import social.bony.nostr.Filter
 import social.bony.nostr.ProfileContent
 import social.bony.nostr.pubkeys
+import social.bony.nostr.quotedEventId
 import social.bony.nostr.relay.RelayMessage
 import social.bony.nostr.relay.RelayPool
 import social.bony.nostr.relay.RelayStatus
@@ -55,6 +56,9 @@ class FeedViewModel @Inject constructor(
     val profiles: StateFlow<Map<String, ProfileContent>> = profileRepository.profiles
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
+    private val _quotedEvents = MutableStateFlow<Map<String, Event>>(emptyMap())
+    val quotedEvents: StateFlow<Map<String, Event>> = _quotedEvents.asStateFlow()
+
     val activeAccount: StateFlow<Account?> = accountRepository.activeAccount
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
@@ -63,6 +67,9 @@ class FeedViewModel @Inject constructor(
 
     val accounts = accountRepository.accounts
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    // Tracks quote IDs already requested so we don't issue duplicate subscriptions
+    private val requestedQuoteIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     private var collectJob: Job? = null
     private var feedSubId: String? = null
@@ -112,6 +119,7 @@ class FeedViewModel @Inject constructor(
         feedSettled = false
         followsReceived = false
         pendingBuffer.clear()
+        requestedQuoteIds.clear()
 
         _uiState.update {
             if (clearEvents) it.copy(events = emptyList(), isLoading = true, error = null)
@@ -312,6 +320,7 @@ class FeedViewModel @Inject constructor(
                 .sortedByDescending { it.createdAt }
             state.copy(events = updated)
         }
+        fetchQuotesForEvents(listOf(event))
     }
 
     /** Flush buffered events into the UI all at once, sorted by recency, then scroll to top. */
@@ -325,6 +334,59 @@ class FeedViewModel @Inject constructor(
             state.copy(events = merged)
         }
         _scrollToTop.tryEmit(Unit)
+        fetchQuotesForEvents(events)
+    }
+
+    private fun fetchQuotesForEvents(events: List<Event>) {
+        val toResolve = mutableListOf<String>()
+
+        for (event in events) {
+            when (event.kind) {
+                EventKind.REPOST -> {
+                    // Kind-6: try parsing the embedded event from content first
+                    val embedded = runCatching { Event.fromJson(event.content) }.getOrNull()
+                    if (embedded != null && embedded.verify()) {
+                        _quotedEvents.update { it + (embedded.id to embedded) }
+                        viewModelScope.launch { eventRepository.save(embedded, "") }
+                    } else {
+                        // Fall back to fetching by e tag
+                        val refId = event.parsedTags.firstOrNull { it.name == "e" }?.value()
+                        if (refId != null && refId !in requestedQuoteIds) toResolve.add(refId)
+                    }
+                }
+                EventKind.TEXT_NOTE -> {
+                    val qId = event.parsedTags.quotedEventId
+                    if (qId != null && qId !in requestedQuoteIds) toResolve.add(qId)
+                }
+            }
+        }
+
+        val missing = toResolve.distinct().filter { it !in _quotedEvents.value }
+        if (missing.isEmpty()) return
+        missing.forEach { requestedQuoteIds.add(it) }
+
+        viewModelScope.launch {
+            val cached = eventRepository.getByIds(missing).associateBy { it.id }
+            if (cached.isNotEmpty()) _quotedEvents.update { it + cached }
+            val stillMissing = missing.filter { it !in cached }
+            if (stillMissing.isEmpty()) return@launch
+
+            val subId = sub(listOf(Filter(ids = stillMissing, kinds = listOf(EventKind.TEXT_NOTE))))
+            pool.messages.collect { poolMsg ->
+                val msg = poolMsg.message
+                if (msg is RelayMessage.EventMessage
+                    && msg.subscriptionId == subId
+                    && msg.event.id in stillMissing
+                    && msg.event.verify()
+                ) {
+                    eventRepository.save(msg.event, "")
+                    _quotedEvents.update { it + (msg.event.id to msg.event) }
+                }
+                if (msg is RelayMessage.EndOfStoredEvents && msg.subscriptionId == subId) {
+                    pool.unsubscribe(subId)
+                }
+            }
+        }
     }
 
     private fun clearFeed() {

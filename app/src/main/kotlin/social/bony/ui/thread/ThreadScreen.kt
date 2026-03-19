@@ -27,7 +27,9 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import social.bony.nostr.Event
+import social.bony.nostr.EventKind
 import social.bony.nostr.ProfileContent
+import social.bony.nostr.quotedEventId
 import social.bony.ui.feed.NoteCard
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -40,6 +42,7 @@ fun ThreadScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
+    val quotedEvents by viewModel.quotedEvents.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
 
     // Build display list: [root?, gap?, parent?, focused, replies...]
@@ -91,6 +94,14 @@ fun ThreadScreen(
                                 profile = profiles[item.event.pubkey],
                                 profiles = profiles,
                                 highlighted = item.focused,
+                                quotedEvent = run {
+                                    val refId = when (item.event.kind) {
+                                        EventKind.REPOST ->
+                                            item.event.parsedTags.firstOrNull { it.name == "e" }?.value()
+                                        else -> item.event.parsedTags.quotedEventId
+                                    }
+                                    refId?.let { quotedEvents[it] }
+                                },
                                 onThreadClick = onThreadClick,
                                 onProfileClick = onProfileClick,
                             )

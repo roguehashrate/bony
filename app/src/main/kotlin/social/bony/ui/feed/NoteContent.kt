@@ -34,6 +34,7 @@ import coil.compose.AsyncImage
 private val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "gif", "webp", "bmp")
 private val VIDEO_EXTENSIONS = setOf("mp4", "webm", "mov", "m4v", "mkv")
 private val URL_REGEX = Regex("""https?://\S+""")
+private val NOSTR_URI_REGEX = Regex("""nostr:(note1|nevent1)\S+""")
 
 sealed class MediaItem {
     data class Image(val url: String) : MediaItem()
@@ -45,9 +46,15 @@ data class ParsedContent(
     val mediaItems: List<MediaItem>,
 )
 
-fun parseNoteContent(content: String): ParsedContent {
+fun parseNoteContent(content: String, stripNostrUris: Boolean = false): ParsedContent {
     val mediaItems = mutableListOf<MediaItem>()
-    val text = URL_REGEX.replace(content) { match ->
+
+    // Strip nostr: URIs first (they render as embedded quote cards)
+    val withoutNostrUris = if (stripNostrUris)
+        NOSTR_URI_REGEX.replace(content, "")
+    else content
+
+    val text = URL_REGEX.replace(withoutNostrUris) { match ->
         val url = match.value
         val ext = url.substringAfterLast('.').lowercase()
             .substringBefore('?').substringBefore('#')

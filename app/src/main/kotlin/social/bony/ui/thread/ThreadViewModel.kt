@@ -17,6 +17,7 @@ import social.bony.nostr.Event
 import social.bony.nostr.EventKind
 import social.bony.nostr.Filter
 import social.bony.nostr.ProfileContent
+import social.bony.nostr.quotedEventId
 import social.bony.nostr.relay.RelayMessage
 import social.bony.nostr.relay.RelayPool
 import social.bony.nostr.replyEventId
@@ -49,6 +50,9 @@ class ThreadViewModel @Inject constructor(
 
     val profiles: StateFlow<Map<String, ProfileContent>> = profileRepository.profiles
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
+    private val _quotedEvents = MutableStateFlow<Map<String, Event>>(emptyMap())
+    val quotedEvents: StateFlow<Map<String, Event>> = _quotedEvents.asStateFlow()
 
     init {
         viewModelScope.launch(Dispatchers.Default) { loadThread() }
@@ -110,6 +114,7 @@ class ThreadViewModel @Inject constructor(
             _uiState.update { it.copy(isLoading = false) }
             subscribeReplies()
             fetchProfiles(listOf(focused))
+            fetchQuotesForEvents(listOf(focused))
             return
         }
 
@@ -127,7 +132,9 @@ class ThreadViewModel @Inject constructor(
         if (missing.isEmpty()) {
             _uiState.update { it.copy(isLoading = false) }
             subscribeReplies()
-            fetchProfiles(listOfNotNull(_uiState.value.root, _uiState.value.parent, focused))
+            val allEvents = listOfNotNull(_uiState.value.root, _uiState.value.parent, focused)
+            fetchProfiles(allEvents)
+            fetchQuotesForEvents(allEvents)
             return
         }
 
@@ -154,7 +161,9 @@ class ThreadViewModel @Inject constructor(
                     _uiState.update { it.copy(isLoading = false) }
                     val state = _uiState.value
                     subscribeReplies()
-                    fetchProfiles(listOfNotNull(state.root, state.parent, focused))
+                    val allEvents = listOfNotNull(state.root, state.parent, focused)
+                    fetchProfiles(allEvents)
+                    fetchQuotesForEvents(allEvents)
                 }
             }
         }
@@ -179,6 +188,7 @@ class ThreadViewModel @Inject constructor(
                             .sortedBy { it.createdAt }
                         state.copy(replies = updated)
                     }
+                    fetchQuotesForEvents(listOf(msg.event))
                 }
             }
         }
@@ -187,5 +197,49 @@ class ThreadViewModel @Inject constructor(
     private fun fetchProfiles(events: List<Event>) {
         val pubkeys = events.map { it.pubkey }.distinct()
         pool.subscribe(listOf(Filter(authors = pubkeys, kinds = listOf(EventKind.METADATA))))
+    }
+
+    fun fetchQuotesForEvents(events: List<Event>) {
+        val quoteIds = events.mapNotNull { event ->
+            when (event.kind) {
+                EventKind.REPOST -> {
+                    val embedded = runCatching { Event.fromJson(event.content) }.getOrNull()
+                    if (embedded != null && embedded.verify()) {
+                        _quotedEvents.update { it + (embedded.id to embedded) }
+                        viewModelScope.launch { eventRepository.save(embedded, "") }
+                        null
+                    } else {
+                        event.parsedTags.firstOrNull { it.name == "e" }?.value()
+                    }
+                }
+                EventKind.TEXT_NOTE -> event.parsedTags.quotedEventId
+                else -> null
+            }
+        }.distinct().filter { it !in _quotedEvents.value }
+
+        if (quoteIds.isEmpty()) return
+
+        viewModelScope.launch {
+            val cached = eventRepository.getByIds(quoteIds).associateBy { it.id }
+            if (cached.isNotEmpty()) _quotedEvents.update { it + cached }
+            val missing = quoteIds.filter { it !in cached }
+            if (missing.isEmpty()) return@launch
+
+            val subId = pool.subscribe(listOf(Filter(ids = missing, kinds = listOf(EventKind.TEXT_NOTE))))
+            pool.messages.collect { poolMsg ->
+                val msg = poolMsg.message
+                if (msg is RelayMessage.EventMessage
+                    && msg.subscriptionId == subId
+                    && msg.event.id in missing
+                    && msg.event.verify()
+                ) {
+                    eventRepository.save(msg.event, "")
+                    _quotedEvents.update { it + (msg.event.id to msg.event) }
+                }
+                if (msg is RelayMessage.EndOfStoredEvents && msg.subscriptionId == subId) {
+                    pool.unsubscribe(subId)
+                }
+            }
+        }
     }
 }
