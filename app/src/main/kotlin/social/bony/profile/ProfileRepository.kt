@@ -1,12 +1,12 @@
 package social.bony.profile
 
+import android.util.LruCache
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import social.bony.db.ProfileDao
 import social.bony.db.ProfileEntity
@@ -22,22 +22,26 @@ class ProfileRepository @Inject constructor(private val dao: ProfileDao) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private val _profiles = MutableStateFlow<Map<String, ProfileContent>>(emptyMap())
-    val profiles: StateFlow<Map<String, ProfileContent>> = _profiles.asStateFlow()
+    // LruCache is the authoritative in-memory store; capped at 1000 entries.
+    // The StateFlow emits snapshots of it so Compose can observe changes.
+    private val cache = LruCache<String, ProfileContent>(1000)
 
     // Tracks the createdAt of the newest event processed per pubkey (in-memory guard)
     private val latestTimestamp = mutableMapOf<String, Long>()
+
+    private val _profiles = MutableStateFlow<Map<String, ProfileContent>>(emptyMap())
+    val profiles: StateFlow<Map<String, ProfileContent>> = _profiles.asStateFlow()
 
     init {
         scope.launch {
             val cached = dao.getAll()
             if (cached.isEmpty()) return@launch
-            val map = cached.mapNotNull { entity ->
-                val content = entity.toProfileContent() ?: return@mapNotNull null
+            cached.forEach { entity ->
+                val content = entity.toProfileContent() ?: return@forEach
                 latestTimestamp[entity.pubkey] = entity.createdAt
-                entity.pubkey to content
-            }.toMap()
-            _profiles.update { it + map }
+                cache.put(entity.pubkey, content)
+            }
+            _profiles.value = cache.snapshot()
         }
     }
 
@@ -51,12 +55,13 @@ class ProfileRepository @Inject constructor(private val dao: ProfileDao) {
             latestTimestamp[event.pubkey] = event.createdAt
         }
 
-        _profiles.update { it + (event.pubkey to content) }
+        cache.put(event.pubkey, content)
+        _profiles.value = cache.snapshot()
 
         scope.launch {
             dao.upsert(ProfileEntity(event.pubkey, event.content, event.createdAt))
         }
     }
 
-    fun getProfile(pubkey: String): ProfileContent? = _profiles.value[pubkey]
+    fun getProfile(pubkey: String): ProfileContent? = cache.get(pubkey)
 }

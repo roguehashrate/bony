@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -26,6 +27,7 @@ import social.bony.nostr.Filter
 import social.bony.nostr.ProfileContent
 import social.bony.nostr.UnsignedEvent
 import social.bony.nostr.quotedEventId
+import social.bony.nostr.relay.PoolMessage
 import social.bony.nostr.relay.RelayMessage
 import social.bony.ui.feed.extractInlineQuoteId
 import social.bony.nostr.relay.RelayPool
@@ -33,6 +35,7 @@ import social.bony.nostr.replyEventId
 import social.bony.nostr.rootEventId
 import social.bony.profile.ProfileRepository
 import timber.log.Timber
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 
 data class ThreadUiState(
@@ -74,8 +77,24 @@ class ThreadViewModel @Inject constructor(
         .map { it?.pubkey }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
+    private var collectJob: Job? = null
+    private val activeSubIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    private val quoteSubIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    // Phase sub IDs
+    private var focusedSubId: String? = null
+    private var contextSubId: String? = null
+    private var repliesSubId: String? = null
+
+    // Context needed to route incoming events to the right fields
+    @Volatile private var pendingRootId: String? = null
+    @Volatile private var pendingParentId: String? = null
+
     init {
-        viewModelScope.launch(Dispatchers.Default) { loadThread() }
+        collectJob = viewModelScope.launch(Dispatchers.Default) {
+            startLoad()
+            pool.messages.collect { handlePoolMessage(it) }
+        }
     }
 
     fun boost(event: Event) {
@@ -100,66 +119,30 @@ class ThreadViewModel @Inject constructor(
 
     // ── Loading ───────────────────────────────────────────────────────────────
 
-    private suspend fun loadThread() {
-        val focused = eventRepository.getById(eventId) ?: run {
-            fetchFocusedFromRelay()
-            return
-        }
-        _uiState.update { it.copy(focused = focused) }
-        loadContext(focused)
-    }
-
-    /** Fetch the focused event from relay when it's not in the local cache. */
-    private suspend fun fetchFocusedFromRelay() {
-        val subId = pool.subscribe(listOf(
-            Filter(ids = listOf(eventId), kinds = listOf(EventKind.TEXT_NOTE))
-        ))
-        pool.messages.collect { poolMsg ->
-            val msg = poolMsg.message
-            when {
-                msg is RelayMessage.EventMessage
-                    && msg.subscriptionId == subId
-                    && msg.event.id == eventId
-                    && msg.event.verify() -> {
-                    pool.unsubscribe(subId)
-                    eventRepository.save(msg.event, "")
-                    _uiState.update { it.copy(focused = msg.event) }
-                    loadContext(msg.event)
-                }
-                msg is RelayMessage.EndOfStoredEvents && msg.subscriptionId == subId -> {
-                    pool.unsubscribe(subId)
-                    _uiState.update { it.copy(isLoading = false) }
-                }
-            }
+    private suspend fun startLoad() {
+        val focused = eventRepository.getById(eventId)
+        if (focused != null) {
+            _uiState.update { it.copy(focused = focused) }
+            initContext(focused)
+        } else {
+            focusedSubId = pool.subscribe(listOf(
+                Filter(ids = listOf(eventId), kinds = listOf(EventKind.TEXT_NOTE))
+            )).also { activeSubIds.add(it) }
         }
     }
 
-    /**
-     * Loads the thread context for the focused event:
-     * - root: the root of the conversation (NIP-10 "root" marker)
-     * - parent: the direct reply target (NIP-10 "reply" marker), if different from root
-     *
-     * Also starts the live replies subscription.
-     */
-    private suspend fun loadContext(focused: Event) {
+    private suspend fun initContext(focused: Event) {
         val rootId = focused.parsedTags.rootEventId
         val replyId = focused.parsedTags.replyEventId
-
-        // Treat parent as distinct from root only if they differ
         val parentId = replyId?.takeIf { it != rootId }
         val toFetch = listOfNotNull(rootId, parentId).distinct()
 
         if (toFetch.isEmpty()) {
-            // Top-level note — no context above it
             _uiState.update { it.copy(isLoading = false) }
-            subscribeReplies()
-            fetchProfiles(listOf(focused))
-            fetchQuotesForEvents(listOf(focused))
-            reactionsRepository.subscribeTo(listOf(focused.id))
+            startRepliesAndReactions(focused)
             return
         }
 
-        // Seed from cache
         val cached = eventRepository.getByIds(toFetch).associateBy { it.id }
         _uiState.update { state ->
             state.copy(
@@ -172,128 +155,141 @@ class ThreadViewModel @Inject constructor(
         val missing = toFetch.filter { it !in cached }
         if (missing.isEmpty()) {
             _uiState.update { it.copy(isLoading = false) }
-            subscribeReplies()
-            val allEvents = listOfNotNull(_uiState.value.root, _uiState.value.parent, focused)
-            fetchProfiles(allEvents)
-            fetchQuotesForEvents(allEvents)
-            reactionsRepository.subscribeTo(allEvents.map { it.id })
+            startRepliesAndReactions(focused)
             return
         }
 
-        val subId = pool.subscribe(listOf(
+        pendingRootId = rootId
+        pendingParentId = parentId
+        contextSubId = pool.subscribe(listOf(
             Filter(ids = missing, kinds = listOf(EventKind.TEXT_NOTE))
-        ))
-        pool.messages.collect { poolMsg ->
-            val msg = poolMsg.message
-            when {
-                msg is RelayMessage.EventMessage
-                    && msg.subscriptionId == subId
-                    && msg.event.id in missing
+        )).also { activeSubIds.add(it) }
+    }
+
+    private fun startRepliesAndReactions(focused: Event) {
+        val state = _uiState.value
+        val allEvents = listOfNotNull(state.root, state.parent, focused)
+        repliesSubId = pool.subscribe(listOf(
+            Filter(eTags = listOf(eventId), kinds = listOf(EventKind.TEXT_NOTE), limit = 50)
+        )).also { activeSubIds.add(it) }
+        fetchProfiles(allEvents)
+        fetchQuotesForEvents(allEvents)
+        reactionsRepository.subscribeTo(allEvents.map { it.id })
+    }
+
+    // ── Single message collector ──────────────────────────────────────────────
+
+    private suspend fun handlePoolMessage(poolMsg: PoolMessage) {
+        val msg = poolMsg.message
+        when {
+            msg is RelayMessage.EventMessage -> when {
+                msg.subscriptionId == focusedSubId
+                    && msg.event.id == eventId
                     && msg.event.verify() -> {
-                    eventRepository.save(msg.event, "")
+                    viewModelScope.launch { eventRepository.save(msg.event, "") }
+                    _uiState.update { it.copy(focused = msg.event) }
+                }
+                msg.subscriptionId == contextSubId && msg.event.verify() -> {
+                    viewModelScope.launch { eventRepository.save(msg.event, "") }
                     _uiState.update { state ->
                         state.copy(
-                            root = if (msg.event.id == rootId) msg.event else state.root,
-                            parent = if (msg.event.id == parentId) msg.event else state.parent,
+                            root = if (msg.event.id == pendingRootId) msg.event else state.root,
+                            parent = if (msg.event.id == pendingParentId) msg.event else state.parent,
                         )
                     }
                 }
-                msg is RelayMessage.EndOfStoredEvents && msg.subscriptionId == subId -> {
-                    pool.unsubscribe(subId)
+                msg.subscriptionId == repliesSubId && msg.event.verify() -> {
+                    viewModelScope.launch { eventRepository.save(msg.event, "") }
+                    _uiState.update { state ->
+                        val updated = (state.replies + msg.event)
+                            .distinctBy { it.id }
+                            .sortedBy { it.createdAt }
+                        state.copy(replies = updated)
+                    }
+                    fetchQuotesForEvents(listOf(msg.event))
+                    reactionsRepository.subscribeTo(listOf(msg.event.id))
+                }
+                msg.subscriptionId in quoteSubIds && msg.event.verify() -> {
+                    handleQuoteEvent(msg.event)
+                }
+                msg.event.kind == EventKind.METADATA && msg.event.verify() -> {
+                    profileRepository.processEvent(msg.event)
+                }
+            }
+            msg is RelayMessage.EndOfStoredEvents -> when {
+                msg.subscriptionId == focusedSubId -> {
+                    activeSubIds.remove(msg.subscriptionId)
+                    pool.unsubscribe(msg.subscriptionId)
+                    focusedSubId = null
+                    val focused = _uiState.value.focused
+                    if (focused != null) initContext(focused)
+                    else _uiState.update { it.copy(isLoading = false) }
+                }
+                msg.subscriptionId == contextSubId -> {
+                    activeSubIds.remove(msg.subscriptionId)
+                    pool.unsubscribe(msg.subscriptionId)
+                    contextSubId = null
                     _uiState.update { it.copy(isLoading = false) }
-                    val state = _uiState.value
-                    subscribeReplies()
-                    val allEvents = listOfNotNull(state.root, state.parent, focused)
-                    fetchProfiles(allEvents)
-                    fetchQuotesForEvents(allEvents)
-                    reactionsRepository.subscribeTo(allEvents.map { it.id })
+                    val focused = _uiState.value.focused ?: return
+                    startRepliesAndReactions(focused)
+                }
+                msg.subscriptionId in quoteSubIds -> {
+                    quoteSubIds.remove(msg.subscriptionId)
+                    pool.unsubscribe(msg.subscriptionId)
                 }
             }
         }
     }
 
-    /** Subscribe to live replies targeting the focused event. */
-    private fun subscribeReplies() {
-        val subId = pool.subscribe(listOf(
-            Filter(eTags = listOf(eventId), kinds = listOf(EventKind.TEXT_NOTE), limit = 50)
-        ))
-        viewModelScope.launch {
-            pool.messages.collect { poolMsg ->
-                val msg = poolMsg.message
-                if (msg is RelayMessage.EventMessage && msg.event.verify()) {
-                    when {
-                        msg.subscriptionId == subId -> {
-                            eventRepository.save(msg.event, "")
-                            _uiState.update { state ->
-                                val updated = (state.replies + msg.event)
-                                    .distinctBy { it.id }
-                                    .sortedBy { it.createdAt }
-                                state.copy(replies = updated)
-                            }
-                            fetchQuotesForEvents(listOf(msg.event))
-                            reactionsRepository.subscribeTo(listOf(msg.event.id))
-                        }
-                        msg.event.kind == EventKind.METADATA -> {
-                            // Process any metadata events arriving while thread is open
-                            profileRepository.processEvent(msg.event)
-                        }
-                    }
-                }
-            }
-        }
+    private fun handleQuoteEvent(event: Event) {
+        _quotedEvents.update { it + (event.id to event) }
+        viewModelScope.launch { eventRepository.save(event, "") }
+        fetchMetadataForAuthors(listOf(event.pubkey))
     }
 
     private fun fetchProfiles(events: List<Event>) {
         val pubkeys = events.map { it.pubkey }.distinct()
         pool.subscribe(listOf(Filter(authors = pubkeys, kinds = listOf(EventKind.METADATA))))
+            .also { activeSubIds.add(it) }
     }
 
     fun fetchQuotesForEvents(events: List<Event>) {
-        val quoteIds = events.mapNotNull { event ->
+        val toResolve = mutableListOf<String>()
+        for (event in events) {
             when (event.kind) {
                 EventKind.REPOST -> {
                     val embedded = runCatching { Event.fromJson(event.content) }.getOrNull()
                     if (embedded != null && embedded.verify()) {
                         _quotedEvents.update { it + (embedded.id to embedded) }
                         viewModelScope.launch { eventRepository.save(embedded, "") }
-                        null
                     } else {
                         event.parsedTags.firstOrNull { it.name == "e" }?.value()
+                            ?.takeIf { it !in _quotedEvents.value }
+                            ?.let { toResolve.add(it) }
                     }
                 }
-                EventKind.TEXT_NOTE -> event.parsedTags.quotedEventId
-                    ?: extractInlineQuoteId(event.content)
-                else -> null
+                EventKind.TEXT_NOTE -> {
+                    (event.parsedTags.quotedEventId ?: extractInlineQuoteId(event.content))
+                        ?.takeIf { it !in _quotedEvents.value }
+                        ?.let { toResolve.add(it) }
+                }
+                else -> Unit
             }
-        }.distinct().filter { it !in _quotedEvents.value }
+        }
 
-        if (quoteIds.isEmpty()) return
+        val missing = toResolve.distinct().filter { it !in _quotedEvents.value }
+        if (missing.isEmpty()) return
 
         viewModelScope.launch {
-            val cached = eventRepository.getByIds(quoteIds).associateBy { it.id }
+            val cached = eventRepository.getByIds(missing).associateBy { it.id }
             if (cached.isNotEmpty()) {
                 _quotedEvents.update { it + cached }
                 fetchMetadataForAuthors(cached.values.map { it.pubkey })
             }
-            val missing = quoteIds.filter { it !in cached }
-            if (missing.isEmpty()) return@launch
-
-            val subId = pool.subscribe(listOf(Filter(ids = missing, kinds = listOf(EventKind.TEXT_NOTE))))
-            pool.messages.collect { poolMsg ->
-                val msg = poolMsg.message
-                if (msg is RelayMessage.EventMessage
-                    && msg.subscriptionId == subId
-                    && msg.event.id in missing
-                    && msg.event.verify()
-                ) {
-                    eventRepository.save(msg.event, "")
-                    _quotedEvents.update { it + (msg.event.id to msg.event) }
-                    fetchMetadataForAuthors(listOf(msg.event.pubkey))
-                }
-                if (msg is RelayMessage.EndOfStoredEvents && msg.subscriptionId == subId) {
-                    pool.unsubscribe(subId)
-                }
-            }
+            val stillMissing = missing.filter { it !in cached }
+            if (stillMissing.isEmpty()) return@launch
+            val subId = pool.subscribe(listOf(Filter(ids = stillMissing, kinds = listOf(EventKind.TEXT_NOTE))))
+            quoteSubIds.add(subId)
         }
     }
 
@@ -301,5 +297,12 @@ class ThreadViewModel @Inject constructor(
         val unknown = pubkeys.distinct().filter { profileRepository.profiles.value[it] == null }
         if (unknown.isEmpty()) return
         pool.subscribe(listOf(Filter(authors = unknown, kinds = listOf(EventKind.METADATA))))
+            .also { activeSubIds.add(it) }
+    }
+
+    override fun onCleared() {
+        collectJob?.cancel()
+        activeSubIds.forEach { pool.unsubscribe(it) }
+        quoteSubIds.forEach { pool.unsubscribe(it) }
     }
 }

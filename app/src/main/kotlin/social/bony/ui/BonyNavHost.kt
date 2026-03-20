@@ -26,6 +26,7 @@ import kotlinx.coroutines.flow.stateIn
 import social.bony.account.AccountRepository
 import social.bony.notifications.DeepLinkHandler
 import social.bony.ui.compose.ComposeScreen
+import social.bony.ui.notifications.NotificationsScreen
 import social.bony.ui.feed.FeedScreen
 import social.bony.ui.hashtag.HashtagFeedScreen
 import social.bony.ui.onboarding.OnboardingScreen
@@ -46,6 +47,7 @@ private const val ROUTE_PROFILE = "profile/{pubkey}"
 private const val ROUTE_ADD_ACCOUNT = "add_account"
 private const val ROUTE_ACCOUNT_MANAGEMENT = "account_management"
 private const val ROUTE_RELAY_MANAGEMENT = "relay_management"
+private const val ROUTE_NOTIFICATIONS = "notifications"
 private const val ROUTE_SEARCH = "search"
 private const val ROUTE_HASHTAG = "hashtag/{tag}"
 
@@ -91,8 +93,16 @@ fun BonyNavHost() {
                         onProfileClick = { pubkey -> navController.navigate("profile/$pubkey") },
                         onRelayManagementClick = { navController.navigate(ROUTE_RELAY_MANAGEMENT) },
                         onSearchClick = { navController.navigate(ROUTE_SEARCH) },
+                        onNotificationsClick = { navController.navigate(ROUTE_NOTIFICATIONS) },
                         onReplyClick = { event -> navController.navigate("compose?replyToId=${event.id}") },
                         onQuoteClick = { event -> navController.navigate("compose?quoteToId=${event.id}") },
+                    )
+                }
+                composable(ROUTE_NOTIFICATIONS) {
+                    NotificationsScreen(
+                        onBack = { navController.popBackStack() },
+                        onThreadClick = { eventId -> navController.navigate("thread/$eventId") },
+                        onProfileClick = { pubkey -> navController.navigate("profile/$pubkey") },
                     )
                 }
                 composable(ROUTE_THREAD) {

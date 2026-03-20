@@ -65,7 +65,7 @@ fun NoteCard(
     onQuote: ((Event) -> Unit)? = null,
     onLike: ((Event) -> Unit)? = null,
     onShare: ((Event) -> Unit)? = null,
-    reactions: Map<String, Set<String>> = emptyMap(),
+    reactors: Set<String>? = null,
     activePubkey: String? = null,
     modifier: Modifier = Modifier,
 ) {
@@ -73,7 +73,15 @@ fun NoteCard(
 
     // ── Kind-6 repost: "X boosted" header + inner card ───────────────────────
     if (event.kind == EventKind.REPOST) {
-        Column(modifier = modifier.background(background)) {
+        val repostTarget = quotedEvent
+        Column(modifier = modifier
+            .background(background)
+            .then(
+                if (onThreadClick != null && repostTarget != null)
+                    Modifier.clickable { onThreadClick(repostTarget.id) }
+                else Modifier
+            )
+        ) {
             // Boost header
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -111,7 +119,7 @@ fun NoteCard(
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                 )
                 NoteActions(quotedEvent, onReply, onBoost, onQuote, onLike, onShare,
-                    reactions, activePubkey,
+                    reactors, activePubkey,
                     modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 4.dp))
             } else {
                 Text(
@@ -127,7 +135,15 @@ fun NoteCard(
     }
 
     // ── Kind-1 text note (possibly with inline quote) ─────────────────────────
-    Column(modifier = modifier.background(background).padding(horizontal = 16.dp, vertical = 12.dp)) {
+    Column(modifier = modifier
+        .background(background)
+        .then(
+            if (onThreadClick != null)
+                Modifier.clickable { onThreadClick(event.id) }
+            else Modifier
+        )
+        .padding(horizontal = 16.dp, vertical = 12.dp)
+    ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = if (onProfileClick != null)
@@ -198,7 +214,7 @@ fun NoteCard(
 
         val hasQuote = event.parsedTags.quotedEventId != null
             || extractInlineQuoteId(event.content) != null
-        val parsed = remember(event.content, profiles) { parseNoteContent(event.content, profiles) }
+        val parsed = remember(event.id) { parseNoteContent(event.content, profiles) }
 
         if (parsed.text.isNotEmpty()) {
             SelectionContainer(modifier = Modifier.padding(start = 50.dp)) {
@@ -240,7 +256,7 @@ fun NoteCard(
         }
 
         NoteActions(event, onReply, onBoost, onQuote, onLike, onShare,
-            reactions, activePubkey,
+            reactors, activePubkey,
             modifier = Modifier.padding(start = 42.dp, top = 2.dp))
     }
 
@@ -300,7 +316,7 @@ fun QuotedNoteCard(
             )
         }
 
-        val parsed = remember(event.content, profiles) { parseNoteContent(event.content, profiles) }
+        val parsed = remember(event.id) { parseNoteContent(event.content, profiles) }
 
         if (parsed.text.isNotEmpty()) {
             Spacer(Modifier.height(6.dp))
@@ -330,7 +346,7 @@ private fun NoteActions(
     onQuote: ((Event) -> Unit)?,
     onLike: ((Event) -> Unit)?,
     onShare: ((Event) -> Unit)?,
-    reactions: Map<String, Set<String>>,
+    reactors: Set<String>?,
     activePubkey: String?,
     modifier: Modifier = Modifier,
 ) {
@@ -367,7 +383,6 @@ private fun NoteActions(
             }
         }
         if (onLike != null) {
-            val reactors = reactions[event.id]
             val count = reactors?.size ?: 0
             val hasReacted = activePubkey != null && reactors?.contains(activePubkey) == true
             Row(verticalAlignment = Alignment.CenterVertically) {

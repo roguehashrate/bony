@@ -255,7 +255,7 @@ fun ProfileScreen(
                     onThreadClick = onThreadClick,
                     onProfileClick = onProfileClick,
                     onLike = viewModel::react,
-                    reactions = reactions,
+                    reactors = reactions[event.id],
                     activePubkey = activePubkey,
                 )
             }

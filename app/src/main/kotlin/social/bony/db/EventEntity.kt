@@ -1,12 +1,19 @@
 package social.bony.db
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import social.bony.nostr.Event
 
-@Entity(tableName = "events")
+@Entity(
+    tableName = "events",
+    indices = [
+        Index(value = ["kind", "accountPubkey"]),
+        Index(value = ["createdAt"]),
+    ],
+)
 data class EventEntity(
     @PrimaryKey val id: String,
     val pubkey: String,

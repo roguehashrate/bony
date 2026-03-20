@@ -11,6 +11,7 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
@@ -50,6 +51,7 @@ fun FeedScreen(
     onProfileClick: (pubkey: String) -> Unit = {},
     onRelayManagementClick: () -> Unit = {},
     onSearchClick: () -> Unit = {},
+    onNotificationsClick: () -> Unit = {},
     onReplyClick: (social.bony.nostr.Event) -> Unit = {},
     onQuoteClick: (social.bony.nostr.Event) -> Unit = {},
     viewModel: FeedViewModel = hiltViewModel(),
@@ -111,6 +113,9 @@ fun FeedScreen(
                         relayStatuses.values.any { it == social.bony.nostr.relay.RelayStatus.CONNECTED }  -> social.bony.nostr.relay.RelayStatus.CONNECTED
                         relayStatuses.values.any { it == social.bony.nostr.relay.RelayStatus.CONNECTING } -> social.bony.nostr.relay.RelayStatus.CONNECTING
                         else -> social.bony.nostr.relay.RelayStatus.DISCONNECTED
+                    }
+                    IconButton(onClick = onNotificationsClick) {
+                        Icon(Icons.Default.Notifications, contentDescription = "Notifications")
                     }
                     IconButton(onClick = onSearchClick) {
                         Icon(Icons.Default.Search, contentDescription = "Search")
@@ -177,19 +182,20 @@ fun FeedScreen(
                     else -> {
                         LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                             items(uiState.events, key = { it.id }) { event ->
+                                val quotedEvent = remember(event.id, quotedEvents) {
+                                    val refId = when (event.kind) {
+                                        social.bony.nostr.EventKind.REPOST ->
+                                            event.parsedTags.firstOrNull { it.name == "e" }?.value()
+                                        else -> event.parsedTags.quotedEventId
+                                            ?: extractInlineQuoteId(event.content)
+                                    }
+                                    refId?.let { quotedEvents[it] }
+                                }
                                 NoteCard(
                                     event = event,
                                     profile = profiles[event.pubkey],
                                     profiles = profiles,
-                                    quotedEvent = run {
-                                        val refId = when (event.kind) {
-                                            social.bony.nostr.EventKind.REPOST ->
-                                                event.parsedTags.firstOrNull { it.name == "e" }?.value()
-                                            else -> event.parsedTags.quotedEventId
-                                                ?: extractInlineQuoteId(event.content)
-                                        }
-                                        refId?.let { quotedEvents[it] }
-                                    },
+                                    quotedEvent = quotedEvent,
                                     onThreadClick = onThreadClick,
                                     onProfileClick = onProfileClick,
                                     onReply = onReplyClick,
@@ -197,7 +203,10 @@ fun FeedScreen(
                                     onQuote = onQuoteClick,
                                     onLike = viewModel::react,
                                     onShare = onShare,
-                                    reactions = reactions,
+                                    reactors = if (event.kind == social.bony.nostr.EventKind.REPOST)
+                                        quotedEvent?.let { reactions[it.id] }
+                                    else
+                                        reactions[event.id],
                                     activePubkey = activeAccount?.pubkey,
                                 )
                             }

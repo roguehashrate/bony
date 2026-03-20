@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -82,6 +83,7 @@ class FeedViewModel @Inject constructor(
     val torEnabled: StateFlow<Boolean> = appSettings.torEnabled
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
+
     val activeAccount: StateFlow<Account?> = accountRepository.activeAccount
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
@@ -94,12 +96,20 @@ class FeedViewModel @Inject constructor(
     // Tracks quote IDs already requested so we don't issue duplicate subscriptions
     private val requestedQuoteIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
+    // One-shot subscriptions for fetching quoted/reposted events — handled in collectMessages()
+    private val quoteSubIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
     private var collectJob: Job? = null
     private var feedSubId: String? = null
     private var followSubId: String? = null
     private var metadataSubId: String? = null
     private var relayListSubId: String? = null
+    @Volatile private var followsRelayListSubId: String? = null
+    @Volatile private var followsForRelaySelection: List<String> = emptyList()
     private var lastLoadedPubkey: String? = null
+
+    // outbox model: relay URL → set of follow pubkeys that write there
+    private val followRelayMap: ConcurrentHashMap<String, MutableSet<String>> = ConcurrentHashMap()
 
     // Only process events belonging to current subscriptions — prevents stale events
     // from old subscriptions bleeding into a newly loaded feed.
@@ -114,9 +124,15 @@ class FeedViewModel @Inject constructor(
 
     init {
         viewModelScope.launch {
-            accountRepository.activeAccount.collect { account ->
-                if (account != null) loadFeed(account) else clearFeed()
-            }
+            // Only reload the feed when the active pubkey changes, not on every
+            // account property update (relays, follows, displayName, etc.).
+            // Incremental updates like relay selection and follow list persist
+            // to the account but must not restart the feed.
+            accountRepository.activeAccount
+                .distinctUntilChanged { old, new -> old?.pubkey == new?.pubkey }
+                .collect { account ->
+                    if (account != null) loadFeed(account) else clearFeed()
+                }
         }
     }
 
@@ -168,11 +184,16 @@ class FeedViewModel @Inject constructor(
         unsub(followSubId); followSubId = null
         unsub(metadataSubId); metadataSubId = null
         unsub(relayListSubId); relayListSubId = null
+        unsub(followsRelayListSubId); followsRelayListSubId = null
+        followsForRelaySelection = emptyList()
+        followRelayMap.clear()
 
         feedSettled = false
         followsReceived = false
         pendingBuffer.clear()
         requestedQuoteIds.clear()
+        quoteSubIds.forEach { pool.unsubscribe(it) }
+        quoteSubIds.clear()
 
         _uiState.update {
             if (clearEvents) it.copy(events = emptyList(), isLoading = true, error = null)
@@ -193,14 +214,7 @@ class FeedViewModel @Inject constructor(
                             .sortedByDescending { it.createdAt }
                         state.copy(events = merged)
                     }
-                    val cachedPubkeys = (cached.map { it.pubkey } +
-                        cached.filter { it.kind == EventKind.TEXT_NOTE }
-                            .flatMap { it.parsedTags.pubkeys }
-                        ).distinct()
-                    unsub(metadataSubId)
-                    metadataSubId = sub(listOf(
-                        Filter(authors = cachedPubkeys, kinds = listOf(EventKind.METADATA))
-                    ))
+                    fetchProfilesForEvents(cached)
                 }
             }
         }
@@ -249,10 +263,19 @@ class FeedViewModel @Inject constructor(
         unsub(followSubId); followSubId = null
         unsub(metadataSubId); metadataSubId = null
         unsub(relayListSubId); relayListSubId = null
+        unsub(followsRelayListSubId); followsRelayListSubId = null
+        followsForRelaySelection = emptyList()
+        followRelayMap.clear()
 
         feedSettled = false
         pendingBuffer.clear()
         requestedQuoteIds.clear()
+        quoteSubIds.forEach { pool.unsubscribe(it) }
+        quoteSubIds.clear()
+
+        // Reset so returning to HOME skips the cache preload — global events must not
+        // bleed into the home feed cache.
+        lastLoadedPubkey = null
 
         _uiState.update { it.copy(events = emptyList(), isLoading = true, error = null) }
 
@@ -290,29 +313,52 @@ class FeedViewModel @Inject constructor(
         pool.messages.collect { poolMessage ->
             when (val msg = poolMessage.message) {
                 is RelayMessage.EventMessage -> {
-                    if (msg.subscriptionId !in activeSubIds) return@collect
-                    if (msg.event.verify()) handleEvent(msg.event)
+                    when {
+                        msg.subscriptionId in activeSubIds -> {
+                            if (msg.event.verify()) handleEvent(msg.event)
+                        }
+                        msg.subscriptionId in quoteSubIds -> {
+                            if (msg.event.verify()) handleQuoteEvent(msg.event)
+                        }
+                    }
                 }
                 is RelayMessage.EndOfStoredEvents -> {
-                    if (msg.subscriptionId !in activeSubIds) return@collect
                     when {
+                        msg.subscriptionId in quoteSubIds -> {
+                            quoteSubIds.remove(msg.subscriptionId)
+                            pool.unsubscribe(msg.subscriptionId)
+                        }
+                        msg.subscriptionId !in activeSubIds -> return@collect
+                        msg.subscriptionId == followsRelayListSubId -> {
+                            unsub(followsRelayListSubId); followsRelayListSubId = null
+                            val follows = followsForRelaySelection
+                            if (follows.isNotEmpty()) selectAndApplyRelays(follows)
+                        }
                         // Expanded feed (after follow list) is ready — show everything.
                         msg.subscriptionId == feedSubId && followsReceived && !feedSettled -> {
                             feedSettled = true
                             flushBuffer()
+                            _uiState.update { it.copy(isLoading = false) }
                         }
                         // Follow subscription returned nothing (user has no follows) —
                         // fall back to showing own notes.
                         msg.subscriptionId == followSubId && !followsReceived && !feedSettled -> {
                             feedSettled = true
                             flushBuffer()
+                            _uiState.update { it.copy(isLoading = false) }
                         }
+                        else -> _uiState.update { it.copy(isLoading = false) }
                     }
-                    _uiState.update { it.copy(isLoading = false) }
                 }
                 else -> Unit
             }
         }
+    }
+
+    private fun handleQuoteEvent(event: Event) {
+        _quotedEvents.update { it + (event.id to event) }
+        viewModelScope.launch { eventRepository.save(event, "") }
+        fetchMetadataForAuthors(listOf(event.pubkey))
     }
 
     private fun handleEvent(event: Event) {
@@ -333,8 +379,16 @@ class FeedViewModel @Inject constructor(
                     }
                 }
             }
-            EventKind.RELAY_LIST  -> handleRelayList(event)
-            EventKind.TEXT_NOTE,
+            EventKind.RELAY_LIST  -> {
+                val selfPubkey = activeAccount.value?.pubkey ?: return
+                if (event.pubkey == selfPubkey) handleRelayList(event)
+                else handleFollowRelayList(event)
+            }
+            EventKind.TEXT_NOTE   -> {
+                // Skip replies — notes with an e-tag are responses to other notes
+                if (event.parsedTags.any { it.name == "e" }) return
+                addToFeed(event)
+            }
             EventKind.REPOST      -> addToFeed(event)
         }
     }
@@ -365,15 +419,26 @@ class FeedViewModel @Inject constructor(
             )
         ))
 
-        unsub(metadataSubId)
-        metadataSubId = sub(listOf(
-            Filter(authors = allPubkeys, kinds = listOf(EventKind.METADATA))
-        ))
-
         // Persist follow list so ProfileViewModel can read it without re-fetching
         viewModelScope.launch {
             activeAccount.value?.let { account ->
                 accountRepository.updateAccount(account.copy(follows = followed))
+            }
+        }
+
+        // Outbox model: fetch kind-10002 for all follows to discover their write relays,
+        // then run greedy set cover to select the ~7 relays that cover the most follows.
+        unsub(followsRelayListSubId)
+        followRelayMap.clear()
+        followsForRelaySelection = followed
+        followsRelayListSubId = sub(listOf(
+            Filter(authors = followed, kinds = listOf(EventKind.RELAY_LIST))
+        ))
+        viewModelScope.launch {
+            delay(5_000)
+            if (followsRelayListSubId != null) {
+                unsub(followsRelayListSubId); followsRelayListSubId = null
+                selectAndApplyRelays(followed)
             }
         }
     }
@@ -404,8 +469,12 @@ class FeedViewModel @Inject constructor(
     }
 
     private fun addToFeed(event: Event) {
-        val accountPubkey = activeAccount.value?.pubkey ?: return
-        viewModelScope.launch { eventRepository.save(event, accountPubkey) }
+        // Only persist home feed events — global feed is a live view and must not
+        // pollute the cache that getRecentFeedEvents returns on next home load.
+        if (_currentFeed.value == FeedTab.HOME) {
+            val accountPubkey = activeAccount.value?.pubkey ?: return
+            viewModelScope.launch { eventRepository.save(event, accountPubkey) }
+        }
         if (!feedSettled) {
             pendingBuffer.add(event)
             return
@@ -414,10 +483,11 @@ class FeedViewModel @Inject constructor(
             val updated = (state.events + event)
                 .distinctBy { it.id }
                 .sortedByDescending { it.createdAt }
+                .take(MAX_FEED_EVENTS)
             state.copy(events = updated)
         }
         fetchQuotesForEvents(listOf(event))
-        fetchProfilesForMentions(listOf(event))
+        fetchProfilesForEvents(listOf(event))
         reactionsRepository.subscribeTo(listOf(event.id))
     }
 
@@ -429,11 +499,12 @@ class FeedViewModel @Inject constructor(
             val merged = (state.events + events)
                 .distinctBy { it.id }
                 .sortedByDescending { it.createdAt }
+                .take(MAX_FEED_EVENTS)
             state.copy(events = merged)
         }
         _scrollToTop.tryEmit(Unit)
         fetchQuotesForEvents(events)
-        fetchProfilesForMentions(events)
+        fetchProfilesForEvents(events)
         reactionsRepository.subscribeTo(events.map { it.id })
     }
 
@@ -477,21 +548,7 @@ class FeedViewModel @Inject constructor(
             if (stillMissing.isEmpty()) return@launch
 
             val subId = pool.subscribe(listOf(Filter(ids = stillMissing, kinds = listOf(EventKind.TEXT_NOTE))))
-            pool.messages.collect { poolMsg ->
-                val msg = poolMsg.message
-                if (msg is RelayMessage.EventMessage
-                    && msg.subscriptionId == subId
-                    && msg.event.id in stillMissing
-                    && msg.event.verify()
-                ) {
-                    eventRepository.save(msg.event, "")
-                    _quotedEvents.update { it + (msg.event.id to msg.event) }
-                    fetchMetadataForAuthors(listOf(msg.event.pubkey))
-                }
-                if (msg is RelayMessage.EndOfStoredEvents && msg.subscriptionId == subId) {
-                    pool.unsubscribe(subId)
-                }
-            }
+            quoteSubIds.add(subId)
         }
     }
 
@@ -501,12 +558,15 @@ class FeedViewModel @Inject constructor(
         sub(listOf(Filter(authors = unknown, kinds = listOf(EventKind.METADATA))))
     }
 
-    /** Fetch kind-0 for any pubkeys mentioned via p-tags in text notes. */
-    private fun fetchProfilesForMentions(events: List<Event>) {
-        val mentioned = events
-            .filter { it.kind == EventKind.TEXT_NOTE }
-            .flatMap { it.parsedTags.pubkeys }
-        fetchMetadataForAuthors(mentioned)
+    /** Fetch kind-0 for note authors and any pubkeys mentioned via p-tags. */
+    private fun fetchProfilesForEvents(events: List<Event>) {
+        val pubkeys = events.flatMap { event ->
+            buildList {
+                add(event.pubkey)
+                if (event.kind == EventKind.TEXT_NOTE) addAll(event.parsedTags.pubkeys)
+            }
+        }
+        fetchMetadataForAuthors(pubkeys)
     }
 
     private fun clearFeed() {
@@ -516,10 +576,74 @@ class FeedViewModel @Inject constructor(
         unsub(followSubId); followSubId = null
         unsub(metadataSubId); metadataSubId = null
         unsub(relayListSubId); relayListSubId = null
+        unsub(followsRelayListSubId); followsRelayListSubId = null
+        followsForRelaySelection = emptyList()
+        followRelayMap.clear()
+        quoteSubIds.forEach { pool.unsubscribe(it) }
+        quoteSubIds.clear()
         _uiState.update { FeedUiState(isLoading = false) }
     }
 
+    /**
+     * NIP-65: collect write relays for a follow so we can run outbox relay selection.
+     */
+    private fun handleFollowRelayList(event: Event) {
+        val writeRelays = event.parsedTags
+            .filter { it.name == "r" }
+            .mapNotNull { tag ->
+                val url = tag.value() ?: return@mapNotNull null
+                val marker = tag.value(2)
+                if (marker == null || marker == "write") url else null
+            }
+        writeRelays.forEach { relay ->
+            followRelayMap.getOrPut(relay) { ConcurrentHashMap.newKeySet() }.add(event.pubkey)
+        }
+    }
+
+    /**
+     * Greedy set cover: selects up to [maxRelays] relay URLs that collectively cover
+     * the most follow pubkeys, favouring relays with the broadest reach first.
+     */
+    private fun greedyRelaySelection(follows: List<String>, maxRelays: Int = MAX_OUTBOX_RELAYS): List<String> {
+        if (followRelayMap.isEmpty()) return emptyList()
+        val uncovered = follows.toMutableSet()
+        val selected = mutableListOf<String>()
+        while (uncovered.isNotEmpty() && selected.size < maxRelays) {
+            val best = followRelayMap.entries
+                .filter { it.key !in selected }
+                .maxByOrNull { entry -> entry.value.count { it in uncovered } }
+                ?: break
+            if (best.value.none { it in uncovered }) break
+            selected.add(best.key)
+            uncovered.removeAll(best.value)
+        }
+        Timber.d("Relay selection: ${selected.size} relays cover ${follows.size - uncovered.size}/${follows.size} follows")
+        return selected
+    }
+
+    /**
+     * Applies the greedy relay selection: adds new relays, removes stale ones,
+     * and persists the result to the account.
+     */
+    private fun selectAndApplyRelays(follows: List<String>) {
+        val outbox = greedyRelaySelection(follows)
+        // Always include DEFAULT_RELAYS as a floor; outbox relays are additive when available.
+        val newRelays = (outbox + DEFAULT_RELAYS).distinct()
+        val current = pool.relayUrls()
+        newRelays.forEach { pool.addRelay(it) }
+        (current - newRelays.toSet()).forEach { pool.removeRelay(it) }
+        Timber.d("Applied relay set (${newRelays.size}): $newRelays")
+        viewModelScope.launch {
+            activeAccount.value?.let { account ->
+                accountRepository.updateAccount(account.copy(relays = newRelays))
+            }
+        }
+    }
+
     companion object {
+        private const val MAX_FEED_EVENTS = 300
+        private const val MAX_OUTBOX_RELAYS = 7
+
         val DEFAULT_RELAYS = listOf(
             "wss://relay.damus.io",
             "wss://relay.nostr.band",

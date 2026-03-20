@@ -114,12 +114,8 @@ fun ThreadScreen(
                 ) {
                     itemsIndexed(items, key = { _, item -> item.key }) { _, item ->
                         when (item) {
-                            is ThreadItem.Note -> NoteCard(
-                                event = item.event,
-                                profile = profiles[item.event.pubkey],
-                                profiles = profiles,
-                                highlighted = item.focused,
-                                quotedEvent = run {
+                            is ThreadItem.Note -> {
+                                val quotedEvent = remember(item.event.id, quotedEvents) {
                                     val refId = when (item.event.kind) {
                                         EventKind.REPOST ->
                                             item.event.parsedTags.firstOrNull { it.name == "e" }?.value()
@@ -127,17 +123,27 @@ fun ThreadScreen(
                                             ?: extractInlineQuoteId(item.event.content)
                                     }
                                     refId?.let { quotedEvents[it] }
-                                },
-                                onThreadClick = onThreadClick,
-                                onProfileClick = onProfileClick,
-                                onReply = onReplyClick,
-                                onBoost = viewModel::boost,
-                                onQuote = onQuoteClick,
-                                onLike = viewModel::react,
-                                onShare = onShare,
-                                reactions = reactions,
-                                activePubkey = activePubkey,
-                            )
+                                }
+                                NoteCard(
+                                    event = item.event,
+                                    profile = profiles[item.event.pubkey],
+                                    profiles = profiles,
+                                    highlighted = item.focused,
+                                    quotedEvent = quotedEvent,
+                                    onThreadClick = onThreadClick,
+                                    onProfileClick = onProfileClick,
+                                    onReply = onReplyClick,
+                                    onBoost = viewModel::boost,
+                                    onQuote = onQuoteClick,
+                                    onLike = viewModel::react,
+                                    onShare = onShare,
+                                    reactors = if (item.event.kind == EventKind.REPOST)
+                                        quotedEvent?.let { reactions[it.id] }
+                                    else
+                                        reactions[item.event.id],
+                                    activePubkey = activePubkey,
+                                )
+                            }
                             ThreadItem.Gap -> GapIndicator()
                         }
                     }

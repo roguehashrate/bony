@@ -1,12 +1,14 @@
 package social.bony.reactions
 
+import android.util.LruCache
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
@@ -18,7 +20,6 @@ import social.bony.nostr.UnsignedEvent
 import social.bony.nostr.relay.RelayMessage
 import social.bony.nostr.relay.RelayPool
 import timber.log.Timber
-import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -38,10 +39,12 @@ class ReactionsRepository @Inject constructor(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
+    // Caps reaction data at 5000 event IDs; oldest entries evicted automatically.
+    private val reactionCache = LruCache<String, Set<String>>(5000)
+    private val subscribedCache = LruCache<String, Unit>(5000)
+
     private val _reactions = MutableStateFlow<Map<String, Set<String>>>(emptyMap())
     val reactions: StateFlow<Map<String, Set<String>>> = _reactions.asStateFlow()
-
-    private val subscribedEventIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     init {
         scope.launch {
@@ -53,10 +56,9 @@ class ReactionsRepository @Inject constructor(
                 ) {
                     val targetId = msg.event.parsedTags
                         .lastOrNull { it.name == "e" }?.value() ?: return@collect
-                    _reactions.update { map ->
-                        val existing = map[targetId] ?: emptySet()
-                        map + (targetId to existing + msg.event.pubkey)
-                    }
+                    val updated = (reactionCache.get(targetId) ?: emptySet()) + msg.event.pubkey
+                    reactionCache.put(targetId, updated)
+                    _reactions.value = reactionCache.snapshot()
                 }
             }
         }
@@ -64,10 +66,19 @@ class ReactionsRepository @Inject constructor(
 
     /** Subscribe to reactions for any event IDs not yet tracked. */
     fun subscribeTo(eventIds: List<String>) {
-        val newIds = eventIds.filter { it !in subscribedEventIds }
+        val newIds = eventIds.filter { subscribedCache.get(it) == null }
         if (newIds.isEmpty()) return
-        subscribedEventIds.addAll(newIds)
-        pool.subscribe(listOf(Filter(eTags = newIds, kinds = listOf(EventKind.REACTION))))
+        newIds.forEach { subscribedCache.put(it, Unit) }
+        val subId = pool.subscribe(listOf(Filter(eTags = newIds, kinds = listOf(EventKind.REACTION))))
+        // Unsubscribe after EOSE — historical data loaded; live reactions handled by the init collector
+        scope.launch {
+            withTimeoutOrNull(30_000) {
+                pool.messages.first { (_, msg) ->
+                    msg is RelayMessage.EndOfStoredEvents && msg.subscriptionId == subId
+                }
+            }
+            pool.unsubscribe(subId)
+        }
     }
 
     /** Publish a "+" reaction. Updates state optimistically; rolls back on failure. */
@@ -76,9 +87,9 @@ class ReactionsRepository @Inject constructor(
             val signer = signerFactory.forActiveAccount() ?: return@launch
             val activePubkey = signer.pubkey
 
-            _reactions.update { map ->
-                map + (event.id to (map[event.id] ?: emptySet()) + activePubkey)
-            }
+            val optimistic = (reactionCache.get(event.id) ?: emptySet()) + activePubkey
+            reactionCache.put(event.id, optimistic)
+            _reactions.value = reactionCache.snapshot()
 
             val unsigned = UnsignedEvent(
                 pubkey = activePubkey,
@@ -92,9 +103,9 @@ class ReactionsRepository @Inject constructor(
             signer.signEvent(unsigned)
                 .onSuccess { pool.publish(it) }
                 .onFailure { e ->
-                    _reactions.update { map ->
-                        map + (event.id to (map[event.id] ?: emptySet()) - activePubkey)
-                    }
+                    val rollback = (reactionCache.get(event.id) ?: emptySet()) - activePubkey
+                    reactionCache.put(event.id, rollback)
+                    _reactions.value = reactionCache.snapshot()
                     Timber.w(e, "React failed")
                 }
         }

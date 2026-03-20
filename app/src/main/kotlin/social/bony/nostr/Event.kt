@@ -10,6 +10,15 @@ import kotlinx.serialization.json.encodeToJsonElement
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import java.security.MessageDigest
 import java.security.Security
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
+
+/** Caches verified event IDs so Schnorr verification is only done once per unique event. */
+object VerifiedEventCache {
+    private val verified: MutableSet<String> = Collections.newSetFromMap(ConcurrentHashMap())
+    fun contains(id: String): Boolean = id in verified
+    fun add(id: String) { verified.add(id) }
+}
 
 /**
  * A Nostr event as defined in NIP-01.
@@ -34,9 +43,12 @@ data class Event(
      * Verifies the event id and signature.
      * Returns false if either check fails — never throws.
      */
-    fun verify(): Boolean = runCatching {
-        verifyId() && verifySignature()
-    }.getOrDefault(false)
+    fun verify(): Boolean {
+        if (VerifiedEventCache.contains(id)) return true
+        val result = runCatching { verifyId() && verifySignature() }.getOrDefault(false)
+        if (result) VerifiedEventCache.add(id)
+        return result
+    }
 
     private fun verifyId(): Boolean {
         val serialized = serializeForId(pubkey, createdAt, kind, tags, content)

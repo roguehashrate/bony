@@ -19,6 +19,7 @@ import social.bony.nostr.ProfileContent
 import social.bony.nostr.relay.RelayMessage
 import social.bony.nostr.relay.RelayPool
 import social.bony.profile.ProfileRepository
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 
 data class HashtagFeedUiState(
@@ -42,6 +43,7 @@ class HashtagFeedViewModel @Inject constructor(
     val profiles: StateFlow<Map<String, ProfileContent>> = profileRepository.profiles
 
     private var subId: String? = null
+    private val profileSubIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
     private val pendingEvents = mutableListOf<Event>()
     @Volatile private var settled = false
 
@@ -103,10 +105,12 @@ class HashtagFeedViewModel @Inject constructor(
 
     private fun fetchProfileForAuthor(pubkey: String) {
         if (profileRepository.profiles.value[pubkey] != null) return
-        pool.subscribe(listOf(Filter(authors = listOf(pubkey), kinds = listOf(EventKind.METADATA), limit = 1)))
+        val id = pool.subscribe(listOf(Filter(authors = listOf(pubkey), kinds = listOf(EventKind.METADATA), limit = 1)))
+        profileSubIds.add(id)
     }
 
     override fun onCleared() {
         subId?.let { pool.unsubscribe(it) }
+        profileSubIds.forEach { pool.unsubscribe(it) }
     }
 }
